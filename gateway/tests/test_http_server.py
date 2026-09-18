@@ -773,39 +773,55 @@ def _check_case(resp: httpx.Response, gateway: ControlFakeGateway, case: dict) -
         assert gateway.esp32.calls == []
     for call in case.get("calls_contain", []):
         assert call in gateway.esp32.calls
-async def test_control_status_connected_reports_full_payload() -> None:
-    gateway = ControlFakeGateway(heartbeat=FakeHeartbeat(gestures=True, speak=True))
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.get("/control/status")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["ok"] is True
-    assert body["esp32_connected"] is True
-    assert body["volume"] == 50  # default
-    assert body["muted"] is False
-    assert body["mic_gain"] == 30  # default
-    assert body["brightness"] == 75  # default (matches firmware NVS default)
-    assert body["led"]["brightness"] == 100  # default
-    assert body["led"]["idle"] == {"on": False, "r": 30, "g": 144, "b": 255}  # default
-    assert body["led"]["listening"] == {"r": 0, "g": 210, "b": 90}
-    assert body["led"]["hermes"] == {"r": 148, "g": 108, "b": 255}
-    assert body["heartbeat"] == {"gestures": True, "speak": True, "interval_min": 30.0}
-    assert body["proximity"] == {"mode": "listen", "threshold": 600}
+# GET /control/status: connected/disconnected payloads, proactive
+# availability, and the presence block — one table, one assertion shape.
+_STATUS_CASES = [
+    {
+        "id": "test_control_status_connected_reports_full_payload",
+        "path": "/control/status",
+        "status": 200,
+        "gateway_kwargs": {"heartbeat": FakeHeartbeat(gestures=True, speak=True)},
+        "body_paths": {
+            "ok": True,
+            "esp32_connected": True,
+            "volume": 50,  # default
+            "muted": False,
+            "mic_gain": 30,  # default
+            "brightness": 75,  # default (matches firmware NVS default)
+            "led.brightness": 100,  # default
+            "led.idle": {"on": False, "r": 30, "g": 144, "b": 255},  # default
+            "led.listening": {"r": 0, "g": 210, "b": 90},
+            "led.hermes": {"r": 148, "g": 108, "b": 255},
+            "heartbeat": {"gestures": True, "speak": True, "interval_min": 30.0},
+            "proximity": {"mode": "listen", "threshold": 600},
+        },
+    },
+    {
+        "id": "test_control_status_disconnected_nulls_device_fields",
+        "path": "/control/status",
+        "status": 200,
+        "gateway_kwargs": {"connected": False, "heartbeat": None},
+        "body_paths": {
+            "esp32_connected": False,
+            "volume": None,
+            "brightness": None,  # live value unknown when no device
+            "led.idle.on": False,  # saved preference still surfaced
+            "heartbeat": None,
+            "proximity": None,
+        },
+    },
+    {"id": "test_control_status_proactive_unavailable_when_no_speaker", "path": "/control/status", "status": 200, "del_env": ["STACKCHAN_PROACTIVE"], "body_paths": {"proactive": {"available": False, "enabled": False}}},
+    {"id": "test_control_status_includes_presence_block", "path": "/control/status", "status": 200, "gateway_kwargs": {"presence": FakePresenceMonitor()}, "body_paths": {"presence.state": "active"}},
+    {"id": "test_control_status_presence_disabled_without_monitor", "path": "/control/status", "status": 200, "body_paths": {"presence": {"enabled": False}}},
+]
 
 @pytest.mark.asyncio
-async def test_control_status_disconnected_nulls_device_fields() -> None:
-    gateway = ControlFakeGateway(connected=False, heartbeat=None)
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.get("/control/status")
-    body = resp.json()
-    assert body["esp32_connected"] is False
-    assert body["volume"] is None
-    assert body["brightness"] is None  # live value unknown when no device
-    assert body["led"]["idle"]["on"] is False  # saved preference still surfaced
-    assert body["heartbeat"] is None
-    assert body["proximity"] is None
+@pytest.mark.parametrize("case", _STATUS_CASES, ids=[c["id"] for c in _STATUS_CASES])
+async def test_control_status_cases(case, monkeypatch) -> None:
+    for env in case.get("del_env", []):
+        monkeypatch.delenv(env, raising=False)
+    resp, gateway = await _request_case(case, method="get")
+    _check_case(resp, gateway, case)
 
 # Control "scalar setter" families: volume / brightness / led_brightness /
 # mic_gain / head / neutral_pose all share the same three-way shape —
@@ -996,14 +1012,6 @@ async def test_control_mute_then_unmute() -> None:
     assert muted.json() == {"ok": True, "volume": 0, "muted": True}
     assert unmuted.json() == {"ok": True, "volume": 60, "muted": False}
 
-@pytest.mark.asyncio
-async def test_control_mute_requires_boolean() -> None:
-    gateway = ControlFakeGateway()
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.post("/control/mute", json={"muted": "yes"})
-    assert resp.status_code == 400
-
 # /control/listen: start vs already-listening differ only in the audio
 # stream state; one table keeps the identical assertions.
 _LISTEN_CASES = [
@@ -1131,21 +1139,12 @@ async def test_control_policy_set_cases(case, monkeypatch) -> None:
             node = node[part]
         assert node == expected
 
-@pytest.mark.asyncio
-async def test_control_status_proactive_unavailable_when_no_speaker(monkeypatch) -> None:
-    monkeypatch.delenv("STACKCHAN_PROACTIVE", raising=False)
-    gateway = ControlFakeGateway()  # no proactive speaker
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        body = (await client.get("/control/status")).json()
-    assert body["proactive"]["available"] is False
-    assert body["proactive"]["enabled"] is False  # default off
-
-# Multiturn / proactive / routing all reject a non-boolean body.
+# Multiturn / proactive / routing / mute all reject a non-boolean body.
 _NON_BOOL_CASES = [
     {"id": "test_control_multiturn_rejects_non_bool", "path": "/control/multiturn", "json": {"enabled": "yes"}},
     {"id": "test_control_proactive_rejects_non_bool", "path": "/control/proactive", "json": {"proactive_enabled": "yes"}},
     {"id": "test_control_routing_rejects_non_bool", "path": "/control/routing", "json": {"force_hermes": "yes"}},
+    {"id": "test_control_mute_requires_boolean", "path": "/control/mute", "json": {"muted": "yes"}},
 ]
 
 @pytest.mark.asyncio
@@ -1215,22 +1214,6 @@ async def test_control_say_cases(case, monkeypatch) -> None:
         _check_case(resp, gateway, case)
     if case.get("patch_orchestrator"):
         assert seen["text"] == case["seen_text"]
-async def test_control_routes_require_token() -> None:
-    gateway = ControlFakeGateway(heartbeat=FakeHeartbeat())
-    app = _build_control_app(gateway, token="secret")
-    async with _client(app) as client:
-        missing = await client.get("/control/status")
-        wrong = await client.post(
-            "/control/volume",
-            json={"volume": 10},
-            headers=_headers(token="wrong"),
-        )
-        ok = await client.get("/control/status", headers=_headers(token="secret"))
-    assert missing.status_code == 401
-    assert missing.text == AUTH_FAILURE_MESSAGE
-    assert wrong.status_code == 401
-    assert ok.status_code == 200
-
 # /control/audio_level: idle vs recording differ only in stream state.
 _AUDIO_LEVEL_CASES = [
     {
@@ -1266,20 +1249,34 @@ async def test_control_audio_level_cases(case, monkeypatch) -> None:
         assert body[key] == expected
 
 # GET control routes with a configured bearer token: no token 401, valid 200.
+# (status also probes a wrong-token POST and the 401 body text.)
 _TOKEN_GET_CASES = [
     {"id": "test_control_audio_level_requires_token", "path": "/control/audio_level"},
     {"id": "test_control_conversation_requires_token", "path": "/control/conversation"},
+    {
+        "id": "test_control_routes_require_token",
+        "path": "/control/status",
+        "gateway_kwargs": {"heartbeat": FakeHeartbeat()},
+        "post_json": {"volume": 10},
+        "auth_text": True,
+    },
 ]
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", _TOKEN_GET_CASES, ids=[c["id"] for c in _TOKEN_GET_CASES])
 async def test_control_get_requires_token(case) -> None:
-    gateway = ControlFakeGateway()
+    gateway = ControlFakeGateway(**case.get("gateway_kwargs", {}))
     app = _build_control_app(gateway, token="secret")
     async with _client(app) as client:
         missing = await client.get(case["path"])
+        wrong = await client.post(
+            case["path"], json=case.get("post_json"), headers=_headers(token="wrong")
+        )
         ok = await client.get(case["path"], headers=_headers(token="secret"))
     assert missing.status_code == 401
+    if case.get("auth_text"):
+        assert missing.text == AUTH_FAILURE_MESSAGE
+    assert wrong.status_code == 401
     assert ok.status_code == 200
 async def test_control_mic_gain_reflected_in_status() -> None:
     gateway = ControlFakeGateway()
@@ -1415,7 +1412,8 @@ async def test_control_presets_delete() -> None:
 # ---- POST /control/i2c (Port A sensor bring-up, "Port A") -----------------
 
 # POST /control/i2c (Port A sensor bring-up): the four ops dispatch
-# verbatim to the device; validation rejects stay in their own tables.
+# verbatim to the device; the unknown-op reject rides along on the same
+# scaffold (addr / n_bytes / bytes keep their value tables below).
 _I2C_DISPATCH_CASES = [
     {
         "id": "test_control_i2c_scan_dispatches",
@@ -1449,6 +1447,7 @@ _I2C_DISPATCH_CASES = [
         "status": 200,
         "calls_contain": [("self.i2c.write", {"addr": 0x5A, "bytes": [0x20, 0x13]})],
     },
+    {"id": "test_control_i2c_rejects_unknown_op", "path": "/control/i2c", "json": {"op": "nope"}, "status": 400, "calls_empty": True},
 ]
 
 @pytest.mark.asyncio
@@ -1489,15 +1488,6 @@ async def test_control_i2c_device_error_maps_502() -> None:
         )
     assert resp.status_code == 502
     assert resp.json()["error"] == "ESP_ERR_TIMEOUT"
-
-@pytest.mark.asyncio
-async def test_control_i2c_rejects_unknown_op() -> None:
-    gateway = ControlFakeGateway()
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.post("/control/i2c", json={"op": "nope"})
-    assert resp.status_code == 400
-    assert gateway.esp32.calls == []
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("addr", [0x07, 0x78, "0x5A", True, None])
@@ -1654,41 +1644,36 @@ async def test_control_route_503_when_unavailable(case) -> None:
     assert resp.status_code == 503
 # ---- /control/presence (presence state machine) ----------------------
 
-@pytest.mark.asyncio
-async def test_control_presence_disabled_when_no_monitor() -> None:
-    gateway = ControlFakeGateway()  # presence monitoring not opted in
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.get("/control/presence")
-    assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "enabled": False}
+# GET /control/presence (and /report): disabled vs monitor-backed — same
+# scaffold and assertion shapes; one table.
+_PRESENCE_GET_CASES = [
+    {"id": "test_control_presence_disabled_when_no_monitor", "path": "/control/presence", "status": 200, "body_full": {"ok": True, "enabled": False}},
+    {
+        "id": "test_control_presence_reports_snapshot",
+        "path": "/control/presence",
+        "status": 200,
+        "gateway_kwargs": {"presence": FakePresenceMonitor()},
+        "body_paths": {"ok": True, "enabled": True, "state": "active", "config.absent_after_s": 120},
+    },
+    {
+        "id": "test_control_presence_report_returns_payload",
+        "path": "/control/presence/report",
+        "status": 200,
+        "gateway_kwargs": {"presence": FakePresenceMonitor()},
+        "body_paths": {"ok": True, "basic.samples": 42, "recommendation.auto_apply": False},
+        "report_calls": [7],  # default days
+    },
+    {"id": "test_control_presence_report_disabled_when_no_monitor", "path": "/control/presence/report", "status": 200, "body_full": {"ok": True, "enabled": False}},
+]
 
 @pytest.mark.asyncio
-async def test_control_presence_reports_snapshot() -> None:
-    gateway = ControlFakeGateway(presence=FakePresenceMonitor())
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.get("/control/presence")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["ok"] is True
-    assert body["enabled"] is True
-    assert body["state"] == "active"
-    assert body["config"]["absent_after_s"] == 120
-
-@pytest.mark.asyncio
-async def test_control_presence_report_returns_payload() -> None:
-    monitor = FakePresenceMonitor()
-    gateway = ControlFakeGateway(presence=monitor)
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.get("/control/presence/report")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["ok"] is True
-    assert body["basic"]["samples"] == 42
-    assert body["recommendation"]["auto_apply"] is False
-    assert monitor.report_calls == [7]  # default days
+@pytest.mark.parametrize("case", _PRESENCE_GET_CASES, ids=[c["id"] for c in _PRESENCE_GET_CASES])
+async def test_control_presence_get_cases(case) -> None:
+    resp, gateway = await _request_case(case, method="get")
+    _check_case(resp, gateway, case)
+    if "report_calls" in case:
+        presence = gateway._presence
+        assert isinstance(presence, FakePresenceMonitor) and presence.report_calls == case["report_calls"]
 
 @pytest.mark.asyncio
 async def test_control_presence_report_days_query() -> None:
@@ -1700,32 +1685,6 @@ async def test_control_presence_report_days_query() -> None:
         await client.get("/control/presence/report?days=999")  # clamp to 28
         await client.get("/control/presence/report?days=abc")  # fallback to 7
     assert monitor.report_calls == [14, 28, 7]
-
-@pytest.mark.asyncio
-async def test_control_presence_report_disabled_when_no_monitor() -> None:
-    gateway = ControlFakeGateway()  # presence not opted in
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.get("/control/presence/report")
-    assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "enabled": False}
-
-@pytest.mark.asyncio
-async def test_control_status_includes_presence_block() -> None:
-    gateway = ControlFakeGateway(presence=FakePresenceMonitor())
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.get("/control/status")
-    assert resp.status_code == 200
-    assert resp.json()["presence"]["state"] == "active"
-
-@pytest.mark.asyncio
-async def test_control_status_presence_disabled_without_monitor() -> None:
-    gateway = ControlFakeGateway()
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.get("/control/status")
-    assert resp.json()["presence"] == {"enabled": False}
 
 @pytest.mark.asyncio
 async def test_control_presence_config_updates() -> None:
