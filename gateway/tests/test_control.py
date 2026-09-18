@@ -300,13 +300,69 @@ async def test_concurrent_mute_unmute_preserve_pre_mute_volume():
 # ---- apply_persisted_volume ------------------------------------------
 
 
+
+# Volume / mic_gain / brightness all persist a scalar and re-apply it on
+# startup. The three families share the same "reapplies / retries on
+# failure / skips when disconnected" contract, so they live in one table.
+# Special cases that have extra behaviour stay as dedicated tests below.
+_APPLY_FAMILIES = [
+    {
+        "name": "volume",
+        "state": {"volume": 42, "muted": False, "pre_mute_volume": 42},
+        "call": "self.audio_speaker.set_volume",
+        "kwargs": {"volume": 42},
+        "apply": "apply_persisted_volume",
+        "retries": True,
+    },
+    {
+        "name": "mic_gain",
+        "state": {"volume": 50, "muted": False, "pre_mute_volume": 50, "mic_gain": 22},
+        "call": "self.audio_speaker.set_mic_gain",
+        "kwargs": {"gain": 22},
+        "apply": "apply_persisted_mic_gain",
+        "retries": True,
+    },
+    {
+        "name": "brightness",
+        "state": {"brightness": 33},
+        "call": "self.screen.set_brightness",
+        "kwargs": {"brightness": 33},
+        "apply": "apply_persisted_brightness",
+        "retries": False,
+    },
+]
+
+
 @pytest.mark.asyncio
-async def test_apply_persisted_volume_reapplies(monkeypatch):
+@pytest.mark.parametrize("family", _APPLY_FAMILIES, ids=lambda f: f["name"])
+async def test_apply_persisted_reapplies(monkeypatch, family):
     monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
     gw = FakeGateway()
-    control.save_state({"volume": 42, "muted": False, "pre_mute_volume": 42})
-    await control.apply_persisted_volume(gw)
-    assert ("self.audio_speaker.set_volume", {"volume": 42}) in gw.esp32.calls
+    control.save_state(family["state"])
+    await getattr(control, family["apply"])(gw)
+    assert (family["call"], family["kwargs"]) in gw.esp32.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "family", [f for f in _APPLY_FAMILIES if f["retries"]], ids=lambda f: f["name"]
+)
+async def test_apply_persisted_retries_on_failure(monkeypatch, family):
+    monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
+    gw = FakeGateway(fail=True)
+    control.save_state(family["state"])
+    await getattr(control, family["apply"])(gw)
+    # Initial attempt + one retry = 2 calls.
+    assert len(gw.esp32.calls) == control._APPLY_VOLUME_RETRIES + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", _APPLY_FAMILIES, ids=lambda f: f["name"])
+async def test_apply_persisted_skips_when_disconnected(monkeypatch, family):
+    monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
+    gw = FakeGateway(connected=False)
+    await getattr(control, family["apply"])(gw)
+    assert gw.esp32.calls == []
 
 
 @pytest.mark.asyncio
@@ -318,22 +374,6 @@ async def test_apply_persisted_volume_muted_applies_zero(monkeypatch):
     assert ("self.audio_speaker.set_volume", {"volume": 0}) in gw.esp32.calls
 
 
-@pytest.mark.asyncio
-async def test_apply_persisted_volume_retries_on_failure(monkeypatch):
-    monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
-    gw = FakeGateway(fail=True)
-    control.save_state({"volume": 42, "muted": False, "pre_mute_volume": 42})
-    await control.apply_persisted_volume(gw)
-    # Initial attempt + one retry = 2 calls.
-    assert len(gw.esp32.calls) == control._APPLY_VOLUME_RETRIES + 1
-
-
-@pytest.mark.asyncio
-async def test_apply_persisted_volume_skips_when_disconnected(monkeypatch):
-    monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
-    gw = FakeGateway(connected=False)
-    await control.apply_persisted_volume(gw)
-    assert gw.esp32.calls == []
 
 
 # ---- set_device_status_text ------------------------------------------
@@ -531,34 +571,7 @@ async def test_set_mic_gain_preserves_volume_state():
     assert state["mic_gain"] == 12
 
 
-@pytest.mark.asyncio
-async def test_apply_persisted_mic_gain_reapplies(monkeypatch):
-    monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
-    gw = FakeGateway()
-    control.save_state(
-        {"volume": 50, "muted": False, "pre_mute_volume": 50, "mic_gain": 22}
-    )
-    await control.apply_persisted_mic_gain(gw)
-    assert ("self.audio_speaker.set_mic_gain", {"gain": 22}) in gw.esp32.calls
 
-
-@pytest.mark.asyncio
-async def test_apply_persisted_mic_gain_retries_on_failure(monkeypatch):
-    monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
-    gw = FakeGateway(fail=True)
-    control.save_state(
-        {"volume": 50, "muted": False, "pre_mute_volume": 50, "mic_gain": 22}
-    )
-    await control.apply_persisted_mic_gain(gw)
-    assert len(gw.esp32.calls) == control._APPLY_VOLUME_RETRIES + 1
-
-
-@pytest.mark.asyncio
-async def test_apply_persisted_mic_gain_skips_when_disconnected(monkeypatch):
-    monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
-    gw = FakeGateway(connected=False)
-    await control.apply_persisted_mic_gain(gw)
-    assert gw.esp32.calls == []
 
 
 # ---- brightness -------------------------------------------------------
@@ -589,21 +602,6 @@ async def test_set_brightness_device_failure_does_not_persist():
     assert control.load_state()["brightness"] == control.DEFAULT_BRIGHTNESS
 
 
-@pytest.mark.asyncio
-async def test_apply_persisted_brightness_reapplies(monkeypatch):
-    monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
-    gw = FakeGateway()
-    control.save_state({"brightness": 33})
-    await control.apply_persisted_brightness(gw)
-    assert ("self.screen.set_brightness", {"brightness": 33}) in gw.esp32.calls
-
-
-@pytest.mark.asyncio
-async def test_apply_persisted_brightness_skips_when_disconnected(monkeypatch):
-    monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
-    gw = FakeGateway(connected=False)
-    await control.apply_persisted_brightness(gw)
-    assert gw.esp32.calls == []
 
 
 # ---- LED (3 slots: idle / listening / hermes) ------------------------

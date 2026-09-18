@@ -41,6 +41,7 @@ import re
 import unicodedata
 
 from .http import post_json
+from .statefile import env_float
 
 logger = logging.getLogger(__name__)
 
@@ -143,14 +144,7 @@ def _env_float(name: str, default: float) -> float:
     path; warn once-per-turn and fall back so the misconfiguration is
     visible in the logs instead.
     """
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning("local LLM: invalid %s=%r; using %s", name, raw, default)
-        return default
+    return env_float(name, default, logger)
 
 
 def is_enabled() -> bool:
