@@ -1213,10 +1213,10 @@ async def test_control_say_speaks(monkeypatch) -> None:
     gateway = ControlFakeGateway()
     app = _build_control_app(gateway)
     async with _client(app) as client:
-        resp = await client.post("/control/say", json={"text": "こんにちは"})
+        resp = await client.post("/control/say", json={"text": "hello"})
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "tts": {"frame_count": 3}}
-    assert seen["text"] == "こんにちは"
+    assert seen["text"] == "hello"
 
 
 @pytest.mark.asyncio
@@ -1225,7 +1225,7 @@ async def test_control_say_rejects_empty_and_too_long() -> None:
     app = _build_control_app(gateway)
     async with _client(app) as client:
         empty = await client.post("/control/say", json={"text": "   "})
-        long = await client.post("/control/say", json={"text": "あ" * 201})
+        long = await client.post("/control/say", json={"text": "a" * 201})
     assert empty.status_code == 400
     assert long.status_code == 400
 
@@ -1449,15 +1449,15 @@ async def test_control_conversation_returns_recorded_turns() -> None:
     from stackchan_mcp import control
 
     control._CONVERSATION.clear()
-    control.record_conversation_turn("おはよう", "おはよう！", "local", {"total": 480})
-    control.record_conversation_turn("天気は？", "晴れです", "hermes", {"total": 1500})
+    control.record_conversation_turn("good morning", "good morning!", "local", {"total": 480})
+    control.record_conversation_turn("weather?", "sunny", "hermes", {"total": 1500})
     gateway = ControlFakeGateway()
     app = _build_control_app(gateway)
     async with _client(app) as client:
         resp = await client.get("/control/conversation")
     body = resp.json()
     assert body["ok"] is True
-    assert [t["transcript"] for t in body["turns"]] == ["おはよう", "天気は？"]
+    assert [t["transcript"] for t in body["turns"]] == ["good morning", "weather?"]
     assert body["turns"][0]["route"] == "local"
     assert body["turns"][1]["timings_ms"] == {"total": 1500}
     control._CONVERSATION.clear()
@@ -1485,13 +1485,13 @@ async def test_control_presets_save_and_list() -> None:
     app = _build_control_app(gateway)
     async with _client(app) as client:
         await client.post("/control/volume", json={"volume": 70})
-        saved = await client.post("/control/presets/save", json={"name": "夜"})
+        saved = await client.post("/control/presets/save", json={"name": "night"})
         listed = await client.get("/control/presets/list")
     assert saved.status_code == 200
     assert saved.json()["ok"] is True
     body = listed.json()
     assert body["ok"] is True
-    assert [p["name"] for p in body["presets"]] == ["夜"]
+    assert [p["name"] for p in body["presets"]] == ["night"]
 
 
 @pytest.mark.asyncio
@@ -1581,7 +1581,7 @@ async def test_control_presets_delete() -> None:
     assert listed.json()["presets"] == []
 
 
-# ---- POST /control/i2c (Port A sensor bring-up, "道A") -----------------
+# ---- POST /control/i2c (Port A sensor bring-up, "Port A") -----------------
 
 
 @pytest.mark.asyncio

@@ -58,7 +58,7 @@ async def test_ask_hermes_system_prompt_carries_tool_guidance(
     async def handle(request: web.Request) -> web.Response:
         received["payload"] = await request.json()
         return web.json_response(
-            {"choices": [{"message": {"role": "assistant", "content": "はい "}}]}
+            {"choices": [{"message": {"role": "assistant", "content": "yes "}}]}
         )
 
     runner, base_url = await _run_hermes_stub(handle, aiohttp_unused_port)
@@ -66,18 +66,18 @@ async def test_ask_hermes_system_prompt_carries_tool_guidance(
     monkeypatch.delenv("HERMES_API_KEY", raising=False)
     monkeypatch.delenv("HERMES_VOICE_SYSTEM_PROMPT", raising=False)
     try:
-        reply = await ask_hermes("メモして")
+        reply = await ask_hermes("make a memo")
     finally:
         await runner.cleanup()
 
-    assert reply == "はい"
+    assert reply == "yes"
     system = received["payload"]["messages"][0]
     assert system["role"] == "system"
     assert system["content"].startswith(DEFAULT_VOICE_SYSTEM_PROMPT)
     assert HERMES_VOICE_TOOLS_LINE in system["content"]
     assert received["payload"]["messages"][1] == {
         "role": "user",
-        "content": "メモして",
+        "content": "make a memo",
     }
 
 
@@ -95,15 +95,15 @@ async def test_ask_hermes_custom_prompt_still_gets_tool_guidance(
 
     runner, base_url = await _run_hermes_stub(handle, aiohttp_unused_port)
     monkeypatch.setenv("HERMES_API_URL", base_url)
-    monkeypatch.setenv("HERMES_VOICE_SYSTEM_PROMPT", "カスタム。")
+    monkeypatch.setenv("HERMES_VOICE_SYSTEM_PROMPT", "custom.")
     monkeypatch.delenv("HERMES_API_KEY", raising=False)
     try:
-        await ask_hermes("こんにちは")
+        await ask_hermes("hello")
     finally:
         await runner.cleanup()
 
     system = received["payload"]["messages"][0]
-    assert system["content"].startswith("カスタム。")
+    assert system["content"].startswith("custom.")
     assert HERMES_VOICE_TOOLS_LINE in system["content"]
 
 
@@ -119,22 +119,22 @@ async def test_ask_hermes_explicit_system_prompt_overrides_env(
     async def handle(request: web.Request) -> web.Response:
         received["payload"] = await request.json()
         return web.json_response(
-            {"choices": [{"message": {"role": "assistant", "content": "おかえり"}}]}
+            {"choices": [{"message": {"role": "assistant", "content": "welcome back"}}]}
         )
 
     runner, base_url = await _run_hermes_stub(handle, aiohttp_unused_port)
     monkeypatch.setenv("HERMES_API_URL", base_url)
-    monkeypatch.setenv("HERMES_VOICE_SYSTEM_PROMPT", "env-prompt。")
+    monkeypatch.setenv("HERMES_VOICE_SYSTEM_PROMPT", "env-prompt.")
     monkeypatch.delenv("HERMES_API_KEY", raising=False)
     try:
-        reply = await ask_hermes("状況テスト", system_prompt="自発プロンプト。")
+        reply = await ask_hermes("situation test", system_prompt="proactive prompt.")
     finally:
         await runner.cleanup()
 
-    assert reply == "おかえり"
+    assert reply == "welcome back"
     system = received["payload"]["messages"][0]
-    assert system["content"].startswith("自発プロンプト。")
-    assert "env-prompt。" not in system["content"]
+    assert system["content"].startswith("proactive prompt.")
+    assert "env-prompt." not in system["content"]
     assert HERMES_VOICE_TOOLS_LINE in system["content"]
 
 
@@ -148,7 +148,7 @@ async def test_ask_hermes_error_status_raises(monkeypatch, aiohttp_unused_port):
     monkeypatch.delenv("HERMES_API_KEY", raising=False)
     try:
         with pytest.raises(RuntimeError, match="status=500"):
-            await ask_hermes("こんにちは")
+            await ask_hermes("hello")
     finally:
         await runner.cleanup()
 
@@ -175,7 +175,7 @@ async def test_ask_hermes_sends_conversation_session_id(
     monkeypatch.setenv("HERMES_API_KEY", "secret")
     monkeypatch.delenv("HERMES_VOICE_SYSTEM_PROMPT", raising=False)
     try:
-        await ask_hermes("やあ", session_id="stackchan-voice-abc123")
+        await ask_hermes("hey", session_id="stackchan-voice-abc123")
     finally:
         await runner.cleanup()
 
@@ -202,7 +202,7 @@ async def test_ask_hermes_session_id_falls_back_to_env(
     monkeypatch.setenv("HERMES_API_KEY", "secret")
     monkeypatch.setenv("HERMES_SESSION_ID", "fixed-id")
     try:
-        await ask_hermes("やあ")
+        await ask_hermes("hey")
     finally:
         await runner.cleanup()
 
@@ -227,7 +227,7 @@ async def test_ask_hermes_no_session_header_without_key(
     monkeypatch.setenv("HERMES_API_URL", base_url)
     monkeypatch.delenv("HERMES_API_KEY", raising=False)
     try:
-        await ask_hermes("やあ", session_id="stackchan-voice-abc123")
+        await ask_hermes("hey", session_id="stackchan-voice-abc123")
     finally:
         await runner.cleanup()
 
@@ -295,7 +295,7 @@ def _make_voice_request(gateway) -> web.Request:
 
 
 def _patch_voice_pipeline(
-    monkeypatch, *, transcript: str, reply: str = "はい", route: str = "hermes"
+    monkeypatch, *, transcript: str, reply: str = "yes", route: str = "hermes"
 ):
     """Stub decode / STT / brain / TTS so the turn runs without deps."""
     import stackchan_mcp.stt as stt_mod
@@ -378,14 +378,14 @@ def _record_status_text(monkeypatch) -> list[str]:
 async def test_voice_turn_status_text_sequence(monkeypatch):
     monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
     seen = _record_status_text(monkeypatch)
-    _patch_voice_pipeline(monkeypatch, transcript="おはよう", reply="やあ")
+    _patch_voice_pipeline(monkeypatch, transcript="good morning", reply="hey")
     gateway = _StubGateway()
     request = _make_voice_request(gateway)
 
     response = await hermes_bridge.handle_voice_turn(request)
 
     assert response.status == 200
-    # きいてるよ (STT) → 考え中 (brain) → "" (clear in finally).
+    # I'm listening... (STT) → Thinking... (brain) → "" (clear in finally).
     assert seen == [
         control.STATUS_LISTENING,
         control.STATUS_THINKING,
@@ -406,7 +406,7 @@ async def test_voice_turn_clears_status_on_empty_transcript(monkeypatch):
     response = await hermes_bridge.handle_voice_turn(request)
 
     assert response.status == 200
-    # Listening shown, then cleared in finally (no 考え中 — empty STT).
+    # Listening shown, then cleared in finally (no Thinking... — empty STT).
     assert seen[0] == control.STATUS_LISTENING
     assert seen[-1] == control.STATUS_CLEAR
     assert control.STATUS_THINKING not in seen
@@ -417,7 +417,7 @@ async def test_voice_turn_clears_status_on_empty_transcript(monkeypatch):
 async def test_voice_turn_clears_status_when_brain_fails(monkeypatch):
     monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
     seen = _record_status_text(monkeypatch)
-    _patch_voice_pipeline(monkeypatch, transcript="天気は")
+    _patch_voice_pipeline(monkeypatch, transcript="weather?")
 
     async def boom(text, *, force_hermes=False, session_id=None):
         raise RuntimeError("hermes down")
@@ -443,7 +443,7 @@ async def test_voice_turn_hermes_route_sets_badge_and_led(monkeypatch):
     rec = _record_device_cosmetics(monkeypatch)
     _force_route_hint(monkeypatch, "hermes")
     _patch_voice_pipeline(
-        monkeypatch, transcript="天気は", reply="晴れだよ", route="hermes"
+        monkeypatch, transcript="weather?", reply="sunny", route="hermes"
     )
     gateway = _StubGateway()
 
@@ -451,7 +451,7 @@ async def test_voice_turn_hermes_route_sets_badge_and_led(monkeypatch):
 
     assert response.status == 200
     # Subtitle: reply shown during TTS, then cleared in finally.
-    assert rec["subtitle"] == ["晴れだよ", ""]
+    assert rec["subtitle"] == ["sunny", ""]
     # Badge: "H" set for Hermes, cleared in finally.
     assert rec["badge"] == ["H", ""]
     # LED: listening (STT) → hermes (pre-call thinking + post-call) → idle.
@@ -465,7 +465,7 @@ async def test_voice_turn_local_route_no_badge_no_led(monkeypatch):
     rec = _record_device_cosmetics(monkeypatch)
     _force_route_hint(monkeypatch, "local")
     _patch_voice_pipeline(
-        monkeypatch, transcript="やあ", reply="やあ", route="local"
+        monkeypatch, transcript="hey", reply="hey", route="local"
     )
     gateway = _StubGateway()
 
@@ -473,7 +473,7 @@ async def test_voice_turn_local_route_no_badge_no_led(monkeypatch):
 
     assert response.status == 200
     # Subtitle still shown + cleared for local turns.
-    assert rec["subtitle"] == ["やあ", ""]
+    assert rec["subtitle"] == ["hey", ""]
     # No badge "H" for local — only the finally clear ("").
     assert rec["badge"] == [""]
     # Local keeps the listening colour (no hermes); finally restores idle.
@@ -488,7 +488,7 @@ async def test_voice_turn_clears_cosmetics_when_tts_fails(monkeypatch):
     _record_status_text(monkeypatch)
     rec = _record_device_cosmetics(monkeypatch)
     _patch_voice_pipeline(
-        monkeypatch, transcript="天気は", reply="晴れ", route="hermes"
+        monkeypatch, transcript="weather?", reply="sunny", route="hermes"
     )
 
     async def boom(arguments, *, gateway=None, **kw):
@@ -516,7 +516,7 @@ async def test_voice_turn_records_conversation(monkeypatch):
     _record_status_text(monkeypatch)
     control._CONVERSATION.clear()
     _patch_voice_pipeline(
-        monkeypatch, transcript="おはよう", reply="やあ", route="local"
+        monkeypatch, transcript="good morning", reply="hey", route="local"
     )
     gateway = _StubGateway()
 
@@ -526,8 +526,8 @@ async def test_voice_turn_records_conversation(monkeypatch):
     turns = control.get_conversation()["turns"]
     assert len(turns) == 1
     turn = turns[0]
-    assert turn["transcript"] == "おはよう"
-    assert turn["reply"] == "やあ"
+    assert turn["transcript"] == "good morning"
+    assert turn["reply"] == "hey"
     assert turn["route"] == "local"
     assert turn["timings_ms"] is not None and "total" in turn["timings_ms"]
     control._CONVERSATION.clear()
@@ -556,7 +556,7 @@ async def test_voice_turn_tts_failure_not_recorded(monkeypatch):
     _record_status_text(monkeypatch)
     control._CONVERSATION.clear()
     _patch_voice_pipeline(
-        monkeypatch, transcript="天気は", reply="晴れ", route="hermes"
+        monkeypatch, transcript="weather?", reply="sunny", route="hermes"
     )
 
     async def boom(arguments, *, gateway=None, **kw):
@@ -586,17 +586,17 @@ async def test_generate_reply_force_hermes_bypasses_local(monkeypatch):
 
     async def fake_local(text, *, system_prompt):
         called["local"] = True
-        return "ローカル"
+        return "local"
 
     async def fake_hermes(text, *, session_id=None):
-        return "ハーメス"
+        return "hermes"
 
     monkeypatch.setattr(local_llm, "ask_local", fake_local)
     monkeypatch.setattr(hermes_bridge, "ask_hermes", fake_hermes)
 
-    reply, route = await hermes_bridge.generate_reply("短い", force_hermes=True)
+    reply, route = await hermes_bridge.generate_reply("short", force_hermes=True)
 
-    assert (reply, route) == ("ハーメス", local_llm.ROUTE_HERMES)
+    assert (reply, route) == ("hermes", local_llm.ROUTE_HERMES)
     assert called["local"] is False  # the local fast-path was skipped
 
 
@@ -608,13 +608,13 @@ async def test_generate_reply_default_keeps_local(monkeypatch):
     monkeypatch.setattr(local_llm, "decide_route", lambda _t: local_llm.ROUTE_LOCAL)
 
     async def fake_local(text, *, system_prompt):
-        return "ローカル"
+        return "local"
 
     monkeypatch.setattr(local_llm, "ask_local", fake_local)
 
-    reply, route = await hermes_bridge.generate_reply("短い")
+    reply, route = await hermes_bridge.generate_reply("short")
 
-    assert (reply, route) == ("ローカル", local_llm.ROUTE_LOCAL)
+    assert (reply, route) == ("local", local_llm.ROUTE_LOCAL)
 
 
 @pytest.mark.asyncio
@@ -625,14 +625,14 @@ async def test_voice_turn_force_hermes_lights_hermes_and_passes_flag(monkeypatch
     # The rule-based classifier would pick LOCAL, but the pin forces Hermes.
     _force_route_hint(monkeypatch, "local")
     _patch_voice_pipeline(
-        monkeypatch, transcript="やあ", reply="こんにちは", route="hermes"
+        monkeypatch, transcript="hey", reply="hello", route="hermes"
     )
     monkeypatch.setattr(control, "routing_force_hermes", lambda: True)
     seen: dict[str, bool] = {}
 
     async def fake_gr(text, *, force_hermes=False, session_id=None):
         seen["force_hermes"] = force_hermes
-        return "こんにちは", "hermes"
+        return "hello", "hermes"
 
     monkeypatch.setattr(hermes_bridge, "generate_reply", fake_gr)
     gateway = _StubGateway()
@@ -656,7 +656,7 @@ def _enable_multiturn(monkeypatch, *, muted: bool = False) -> None:
     monkeypatch.setattr(control, "is_muted", lambda: muted)
 
 
-def _run_one_turn(monkeypatch, gateway, *, transcript="やあ", reply="はい", route="hermes"):
+def _run_one_turn(monkeypatch, gateway, *, transcript="hey", reply="yes", route="hermes"):
     monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
     _record_status_text(monkeypatch)
     _record_device_cosmetics(monkeypatch)
@@ -665,7 +665,7 @@ def _run_one_turn(monkeypatch, gateway, *, transcript="やあ", reply="はい", 
 
 @pytest.mark.asyncio
 async def test_multiturn_reopens_listen_on_hermes_question(monkeypatch):
-    _run_one_turn(monkeypatch, None, reply="元気にしてた？", route="hermes")
+    _run_one_turn(monkeypatch, None, reply="how have you been?", route="hermes")
     _enable_multiturn(monkeypatch)
     gateway = _StubGateway()
 
@@ -685,7 +685,7 @@ async def test_multiturn_reopens_listen_on_hermes_question(monkeypatch):
 async def test_multiturn_off_by_default(monkeypatch):
     # No STACKCHAN_MULTITURN env: feature disabled even on a question.
     monkeypatch.delenv("STACKCHAN_MULTITURN", raising=False)
-    _run_one_turn(monkeypatch, None, reply="元気？", route="hermes")
+    _run_one_turn(monkeypatch, None, reply="how are you?", route="hermes")
     gateway = _StubGateway()
 
     response = await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
@@ -698,7 +698,7 @@ async def test_multiturn_off_by_default(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_multiturn_skips_local_route(monkeypatch):
-    _run_one_turn(monkeypatch, None, reply="元気？", route="local")
+    _run_one_turn(monkeypatch, None, reply="how are you?", route="local")
     _enable_multiturn(monkeypatch)
     gateway = _StubGateway()
 
@@ -710,7 +710,7 @@ async def test_multiturn_skips_local_route(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_multiturn_skips_non_question(monkeypatch):
-    _run_one_turn(monkeypatch, None, reply="そうなんだ。", route="hermes")
+    _run_one_turn(monkeypatch, None, reply="I see.", route="hermes")
     _enable_multiturn(monkeypatch)
     gateway = _StubGateway()
 
@@ -721,7 +721,7 @@ async def test_multiturn_skips_non_question(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_multiturn_stops_at_ceiling(monkeypatch):
-    _run_one_turn(monkeypatch, None, reply="まだ続ける？", route="hermes")
+    _run_one_turn(monkeypatch, None, reply="keep going?", route="hermes")
     _enable_multiturn(monkeypatch)
     monkeypatch.setenv("MAX_MULTITURN_TURNS", "2")
     gateway = _StubGateway()
@@ -747,7 +747,7 @@ async def test_multiturn_ceiling_on_question_shows_tap_hint(monkeypatch):
     _record_status_text(monkeypatch)
     rec = _record_device_cosmetics(monkeypatch)
     _patch_voice_pipeline(
-        monkeypatch, transcript="やあ", reply="まだ続ける？", route="hermes"
+        monkeypatch, transcript="hey", reply="keep going?", route="hermes"
     )
     _enable_multiturn(monkeypatch)
     monkeypatch.setenv("MAX_MULTITURN_TURNS", "2")
@@ -774,7 +774,7 @@ async def test_multiturn_no_hint_on_normal_end(monkeypatch):
     _record_status_text(monkeypatch)
     rec = _record_device_cosmetics(monkeypatch)
     _patch_voice_pipeline(
-        monkeypatch, transcript="やあ", reply="そうだね。", route="hermes"
+        monkeypatch, transcript="hey", reply="right.", route="hermes"
     )
     _enable_multiturn(monkeypatch)
     gateway = _StubGateway()
@@ -787,7 +787,7 @@ async def test_multiturn_no_hint_on_normal_end(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_multiturn_skips_when_muted(monkeypatch):
-    _run_one_turn(monkeypatch, None, reply="元気？", route="hermes")
+    _run_one_turn(monkeypatch, None, reply="how are you?", route="hermes")
     _enable_multiturn(monkeypatch, muted=True)
     gateway = _StubGateway()
 
@@ -798,7 +798,7 @@ async def test_multiturn_skips_when_muted(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_multiturn_skips_when_disconnected(monkeypatch):
-    _run_one_turn(monkeypatch, None, reply="元気？", route="hermes")
+    _run_one_turn(monkeypatch, None, reply="how are you?", route="hermes")
     _enable_multiturn(monkeypatch)
     gateway = _StubGateway()
     gateway.esp32.device_connected = False
@@ -833,13 +833,13 @@ async def test_voice_turn_threads_rotating_conversation_id(monkeypatch):
     monkeypatch.delenv("HERMES_SESSION_WINDOW_S", raising=False)  # default 180
     _record_status_text(monkeypatch)
     _record_device_cosmetics(monkeypatch)
-    _patch_voice_pipeline(monkeypatch, transcript="やあ", reply="はい", route="hermes")
+    _patch_voice_pipeline(monkeypatch, transcript="hey", reply="yes", route="hermes")
 
     seen: list[str | None] = []
 
     async def capture_gr(text, *, force_hermes=False, session_id=None):
         seen.append(session_id)
-        return "はい", "hermes"
+        return "yes", "hermes"
 
     monkeypatch.setattr(hermes_bridge, "generate_reply", capture_gr)
     gateway = _StubGateway()
@@ -867,13 +867,13 @@ async def test_voice_turn_window_zero_uses_fixed_session_id(monkeypatch):
     monkeypatch.setenv("HERMES_SESSION_WINDOW_S", "0")
     _record_status_text(monkeypatch)
     _record_device_cosmetics(monkeypatch)
-    _patch_voice_pipeline(monkeypatch, transcript="やあ", reply="はい", route="hermes")
+    _patch_voice_pipeline(monkeypatch, transcript="hey", reply="yes", route="hermes")
 
     seen: list[str | None] = []
 
     async def capture_gr(text, *, force_hermes=False, session_id=None):
         seen.append(session_id)
-        return "はい", "hermes"
+        return "yes", "hermes"
 
     monkeypatch.setattr(hermes_bridge, "generate_reply", capture_gr)
     gateway = _StubGateway()
@@ -889,7 +889,7 @@ async def test_voice_turn_window_zero_uses_fixed_session_id(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_multiturn_stale_gap_resets_at_turn_entry(monkeypatch):
-    _run_one_turn(monkeypatch, None, reply="そうだね。", route="hermes")
+    _run_one_turn(monkeypatch, None, reply="right.", route="hermes")
     _enable_multiturn(monkeypatch)
     monkeypatch.setenv("MULTITURN_SESSION_TIMEOUT_S", "60")
     gateway = _StubGateway()
@@ -913,12 +913,12 @@ async def test_multiturn_continuation_skips_display_clear(monkeypatch):
     monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
     seen = _record_status_text(monkeypatch)
     _record_device_cosmetics(monkeypatch)
-    _patch_voice_pipeline(monkeypatch, transcript="やあ", reply="元気？", route="hermes")
+    _patch_voice_pipeline(monkeypatch, transcript="hey", reply="how are you?", route="hermes")
     _enable_multiturn(monkeypatch)
     gateway = _StubGateway()
 
     await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
 
-    # きいてるよ → 考え中, but NO trailing clear (would blank the re-listen).
+    # I'm listening... → Thinking..., but NO trailing clear (would blank the re-listen).
     assert control.STATUS_CLEAR not in seen
     assert seen == [control.STATUS_LISTENING, control.STATUS_THINKING]

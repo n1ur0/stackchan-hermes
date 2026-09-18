@@ -1,4 +1,4 @@
-"""Tests for the proactive speaker (Hermes 自発判断層).
+"""Tests for the proactive speaker (Hermes autonomous judgment layer).
 
 The speaker is driven through :meth:`ProactiveSpeaker.on_state_change`
 with patched clocks and stubbed Hermes/TTS so no real HTTP, ESP32 or
@@ -70,7 +70,7 @@ def make_speaker(gateway=None, *, tmp_path=None, **config_kw) -> ProactiveSpeake
 def install_stubs(
     monkeypatch,
     *,
-    reply: str = "おかえりなさい",
+    reply: str = "welcome back",
     enabled: bool = True,
     ask_raises: bool = False,
     recording: bool = False,
@@ -146,8 +146,8 @@ def test_from_env_builds_when_enabled(monkeypatch):
     }
     assert speaker._config.max_per_day == 4
     # Default mode presets match the dashboard cards the user saves.
-    assert speaker._config.day_preset == "つうじょう"
-    assert speaker._config.night_preset == "おやすみ"
+    assert speaker._config.day_preset == "normal"
+    assert speaker._config.night_preset == "sleep"
     assert speaker._config.mode_switch_delay_s == proactive.DEFAULT_MODE_DELAY_S
 
 
@@ -166,9 +166,9 @@ def test_from_env_parses_transitions(monkeypatch):
 async def test_absent_active_fires(monkeypatch, tmp_path):
     gw = FakeGateway()
     speaker = make_speaker(gw, tmp_path=tmp_path)
-    rec = install_stubs(monkeypatch, reply="おかえり")
+    rec = install_stubs(monkeypatch, reply="welcome back")
     await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
-    assert rec["spoken"] == ["おかえり"]
+    assert rec["spoken"] == ["welcome back"]
     # The proactive system prompt (not the chat prompt) framed the ask.
     assert rec["asked"][0]["system_prompt"] == proactive.PROACTIVE_SYSTEM_PROMPT
     assert faces(gw) == ["happy", "idle"]
@@ -179,9 +179,9 @@ async def test_absent_active_fires(monkeypatch, tmp_path):
 async def test_quiet_active_fires(monkeypatch, tmp_path):
     gw = FakeGateway()
     speaker = make_speaker(gw, tmp_path=tmp_path)
-    rec = install_stubs(monkeypatch, reply="おはよう")
+    rec = install_stubs(monkeypatch, reply="good morning")
     await speaker.on_state_change(PresenceState.QUIET, PresenceState.ACTIVE)
-    assert rec["spoken"] == ["おはよう"]
+    assert rec["spoken"] == ["good morning"]
 
 
 @pytest.mark.asyncio
@@ -243,7 +243,7 @@ async def test_hermes_failure_stays_silent(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_active_quiet_fires_in_quiet_hours_then_mutes(monkeypatch, tmp_path):
     # The night transition lands at the start of the quiet window. It is
-    # exempt from the quiet-hours guard (おやすみ *is* the night greeting),
+    # exempt from the quiet-hours guard (sleep *is* the night greeting),
     # and must speak *before* the muting preset is applied.
     from stackchan_mcp.heartbeat import parse_quiet_hours
 
@@ -251,13 +251,13 @@ async def test_active_quiet_fires_in_quiet_hours_then_mutes(monkeypatch, tmp_pat
     speaker = make_speaker(
         gw, tmp_path=tmp_path, quiet=parse_quiet_hours("22:00-06:30")
     )
-    rec = install_stubs(monkeypatch, reply="おやすみ")
+    rec = install_stubs(monkeypatch, reply="sleep")
     monkeypatch.setattr(speaker, "_now", lambda: dt.time(23, 30))
     await speaker.on_state_change(PresenceState.ACTIVE, PresenceState.QUIET)
-    assert rec["spoken"] == ["おやすみ"]
-    assert rec["modes"] == ["おやすみ"]
+    assert rec["spoken"] == ["sleep"]
+    assert rec["modes"] == ["sleep"]
     # Speak, a natural beat, *then* apply the muting preset.
-    assert rec["seq"] == ["speak", "delay", "mode:おやすみ"]
+    assert rec["seq"] == ["speak", "delay", "mode:sleep"]
     assert rec["delays"] == [proactive.DEFAULT_MODE_DELAY_S]
     assert faces(gw) == ["happy", "idle"]
 
@@ -270,12 +270,12 @@ async def test_day_transition_applies_mode_before_speaking(monkeypatch, tmp_path
     # lingering overnight mute.
     gw = FakeGateway()
     speaker = make_speaker(gw, tmp_path=tmp_path)
-    rec = install_stubs(monkeypatch, reply="おはよう")
+    rec = install_stubs(monkeypatch, reply="good morning")
     await speaker.on_state_change(old, PresenceState.ACTIVE)
-    assert rec["modes"] == ["つうじょう"]
-    assert rec["spoken"] == ["おはよう"]
+    assert rec["modes"] == ["normal"]
+    assert rec["spoken"] == ["good morning"]
     # Un-mute / brighten, a natural beat, then greet.
-    assert rec["seq"] == ["mode:つうじょう", "delay", "speak"]
+    assert rec["seq"] == ["mode:normal", "delay", "speak"]
 
 
 @pytest.mark.asyncio
@@ -301,10 +301,10 @@ async def test_mode_apply_failure_does_not_block_greeting(monkeypatch, tmp_path)
     # A missing / failing preset is best-effort: the greeting still plays.
     gw = FakeGateway()
     speaker = make_speaker(gw, tmp_path=tmp_path)
-    rec = install_stubs(monkeypatch, reply="おかえり", apply_ok=False)
+    rec = install_stubs(monkeypatch, reply="welcome back", apply_ok=False)
     await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
-    assert rec["modes"] == ["つうじょう"]  # it tried
-    assert rec["spoken"] == ["おかえり"]  # greeting still plays
+    assert rec["modes"] == ["normal"]  # it tried
+    assert rec["spoken"] == ["welcome back"]  # greeting still plays
 
 
 @pytest.mark.asyncio
@@ -321,7 +321,7 @@ async def test_hermes_failure_still_applies_night_mode(monkeypatch, tmp_path):
     monkeypatch.setattr(speaker, "_now", lambda: dt.time(23, 30))
     await speaker.on_state_change(PresenceState.ACTIVE, PresenceState.QUIET)
     assert rec["spoken"] == []  # Hermes down -> stays silent
-    assert rec["modes"] == ["おやすみ"]  # room still goes to night mode
+    assert rec["modes"] == ["sleep"]  # room still goes to night mode
 
 
 @pytest.mark.asyncio
@@ -329,10 +329,10 @@ async def test_empty_preset_name_disables_switch(monkeypatch, tmp_path):
     # An empty configured preset name means "greeting only" for that side.
     gw = FakeGateway()
     speaker = make_speaker(gw, tmp_path=tmp_path, day_preset="")
-    rec = install_stubs(monkeypatch, reply="おかえり")
+    rec = install_stubs(monkeypatch, reply="welcome back")
     await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
     assert rec["modes"] == []  # day-mode switch disabled
-    assert rec["spoken"] == ["おかえり"]  # greeting still happens
+    assert rec["spoken"] == ["welcome back"]  # greeting still happens
     assert rec["seq"] == ["speak"]  # no mode -> no beat either
 
 
@@ -340,20 +340,20 @@ async def test_empty_preset_name_disables_switch(monkeypatch, tmp_path):
 async def test_mode_switch_delay_is_configurable(monkeypatch, tmp_path):
     gw = FakeGateway()
     speaker = make_speaker(gw, tmp_path=tmp_path, mode_switch_delay_s=2.0)
-    rec = install_stubs(monkeypatch, reply="おかえり")
+    rec = install_stubs(monkeypatch, reply="welcome back")
     await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
     assert rec["delays"] == [2.0]
-    assert rec["seq"] == ["mode:つうじょう", "delay", "speak"]
+    assert rec["seq"] == ["mode:normal", "delay", "speak"]
 
 
 @pytest.mark.asyncio
 async def test_mode_switch_delay_zero_is_immediate(monkeypatch, tmp_path):
     gw = FakeGateway()
     speaker = make_speaker(gw, tmp_path=tmp_path, mode_switch_delay_s=0.0)
-    rec = install_stubs(monkeypatch, reply="おかえり")
+    rec = install_stubs(monkeypatch, reply="welcome back")
     await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
     assert rec["delays"] == []  # no beat
-    assert rec["seq"] == ["mode:つうじょう", "speak"]
+    assert rec["seq"] == ["mode:normal", "speak"]
 
 
 # ---- guards (design principle #1) ------------------------------------
@@ -412,7 +412,7 @@ async def test_guard_quiet_hours(monkeypatch, tmp_path):
     # Outside the window it speaks.
     monkeypatch.setattr(speaker, "_now", lambda: dt.time(12, 0))
     await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
-    assert rec["spoken"] == ["おかえりなさい"]
+    assert rec["spoken"] == ["welcome back"]
 
 
 @pytest.mark.asyncio
@@ -427,7 +427,7 @@ async def test_guard_multiturn_continuation(monkeypatch, tmp_path):
     # A stale gap no longer suppresses.
     gw.multiturn = FakeSession(stale=True)
     await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
-    assert rec["spoken"] == ["おかえりなさい"]
+    assert rec["spoken"] == ["welcome back"]
 
 
 @pytest.mark.asyncio
@@ -443,7 +443,7 @@ async def test_guard_recent_interaction_cooldown(monkeypatch, tmp_path):
     # 25 minutes ago -> past cooldown.
     gw.last_human_interaction_monotonic = 10_000.0 - 25 * 60
     await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
-    assert rec["spoken"] == ["おかえりなさい"]
+    assert rec["spoken"] == ["welcome back"]
 
 
 @pytest.mark.asyncio
@@ -454,13 +454,13 @@ async def test_guard_daily_cap(monkeypatch, tmp_path):
     today = dt.date(2026, 6, 22)
     monkeypatch.setattr(speaker, "_today", lambda: today)
     await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
-    assert rec["spoken"] == ["おかえりなさい"]  # 1st: ok
+    assert rec["spoken"] == ["welcome back"]  # 1st: ok
     await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
-    assert rec["spoken"] == ["おかえりなさい"]  # 2nd: capped
+    assert rec["spoken"] == ["welcome back"]  # 2nd: capped
     # Next day rolls the counter over.
     monkeypatch.setattr(speaker, "_today", lambda: dt.date(2026, 6, 23))
     await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
-    assert rec["spoken"] == ["おかえりなさい", "おかえりなさい"]
+    assert rec["spoken"] == ["welcome back", "welcome back"]
 
 
 # ---- refire cooldown (anti-chatter) ----------------------------------

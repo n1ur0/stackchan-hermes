@@ -96,7 +96,7 @@ async def test_pipeline_synthesises_encodes_and_pushes(fake_encode):
     reg.register(engine)
 
     result = await synthesize_and_send(
-        {"text": "こんにちは", "voice": "voicevox", "speaker_id": 7},
+        {"text": "hello", "voice": "voicevox", "speaker_id": 7},
         gateway=gateway,
         registry=reg,
     )
@@ -107,11 +107,11 @@ async def test_pipeline_synthesises_encodes_and_pushes(fake_encode):
     assert result["frame_duration_ms"] == DEVICE_FRAME_DURATION_MS
     assert result["duration_ms"] == 2 * DEVICE_FRAME_DURATION_MS
     assert result["engine"] == "voicevox"
-    assert result["text"] == "こんにちは"
+    assert result["text"] == "hello"
     assert result["speaker_id"] == 7
 
     assert esp32.frames == [b"opus_frame_0", b"opus_frame_1"]
-    assert engine.calls[0][0] == "こんにちは"
+    assert engine.calls[0][0] == "hello"
     assert engine.calls[0][1]["speaker_id"] == 7
     # TTS start before any frame, stop after the last frame.
     assert esp32.tts_states == ["start", "stop"]

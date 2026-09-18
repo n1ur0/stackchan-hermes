@@ -431,7 +431,7 @@ async def _dispatch_mcp_tool(
     # they never touch the ESP32, so they are handled before the
     # device_connected guard below.
     if name in web_search.TOOL_NAMES:
-        # Phase F: during a voice turn, surface "調べ中" on the device so
+        # Phase F: during a voice turn, surface "Searching..." on the device so
         # the user sees the robot is researching. Outside a turn (e.g. a
         # Claude Desktop call) voice_turn_active is falsy and nothing is
         # shown. The hermes bridge's finally clears the status text.
@@ -1186,7 +1186,7 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                 name="set_status_text",
                 description=(
                     "Show a short one-line status string on the device screen "
-                    "under the avatar (e.g. 'きいてるよ', '考え中', '調べ中'). Pass "
+                    "under the avatar (e.g. 'I'm listening...', 'Thinking...', 'Searching...'). Pass "
                     "an empty string to clear it. Used by the gateway's voice "
                     "pipeline for UI feedback; safe to call directly too."
                 ),
@@ -1590,7 +1590,7 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                     "hub: lights, AC, TV, ...), each entry with deviceId / "
                     "deviceName / deviceType (or remoteType). Call this "
                     "first to resolve a spoken request to a deviceId — "
-                    "e.g. for 「電気つけて」, find the matching light here, "
+                    "e.g. for \"turn on the lights\", find the matching light here, "
                     "then call switchbot_send_command with command "
                     "'turnOn'. Requires SWITCHBOT_TOKEN / SWITCHBOT_SECRET "
                     "on the gateway; returns a clear error when unset."
@@ -1632,7 +1632,7 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                     "remote devices (commandType 'command' covers both; "
                     "IR appliances support turnOn / turnOff and "
                     "type-specific commands like setAll). Typical voice "
-                    "flow: 「電気つけて」 → switchbot_list_devices → find "
+                    "flow: \"turn on the lights\" → switchbot_list_devices → find "
                     "the light's deviceId → send command 'turnOn'. Common "
                     "commands: turnOn, turnOff, toggle, press (Bot), "
                     "setPosition (Curtain). Use commandType 'customize' "
@@ -1732,7 +1732,7 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                             "type": "string",
                             "description": (
                                 "File name without directories, e.g. "
-                                "'買い物リスト.md'. A bare name gets "
+                                "'shopping list.md'. A bare name gets "
                                 "'.md' appended; only .md/.txt allowed."
                             ),
                         },

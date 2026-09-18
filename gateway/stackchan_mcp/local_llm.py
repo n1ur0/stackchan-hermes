@@ -53,10 +53,10 @@ ROUTE_LOCAL = "local"
 ROUTE_HERMES = "hermes"
 
 #: Utterances longer than this (after NFKC normalisation) are assumed
-#: to carry real conversational content and go to Hermes. 30 chars of
-#: Japanese comfortably covers greetings, one-clause questions and
-#: command-style phrases ("電気をつけて") while excluding multi-clause
-#: requests.
+#: to carry real conversational content and go to Hermes. 30 chars
+#: comfortably covers greetings, one-clause questions and
+#: command-style phrases ("turn on the lights") while excluding
+#: multi-clause requests.
 LOCAL_MAX_CHARS = 30
 
 #: Substrings that signal the turn needs tools, memory, fresh facts or
@@ -64,79 +64,75 @@ LOCAL_MAX_CHARS = 30
 #: these forces the Hermes route regardless of length.
 HERMES_MARKERS = (
     # needs web / fresh facts
-    "調べ",
-    "検索",
-    "ニュース",
-    "天気",
+    "search",
+    "look up",
+    "lookup",
+    "news",
+    "weather",
     # needs the agent's memory / schedule / side effects
-    "予定",
-    "スケジュール",
-    "メール",
-    "リマインド",
-    "覚えて",
-    "思い出して",
-    "メモ",
-    "リスト",
+    "schedule",
+    "agenda",
+    "calendar",
+    "email",
+    "remind",
+    "remember",
+    "recall",
+    "memo",
+    "note",
+    "list",
     # needs deliberation
-    "なぜ",
-    "どうして",
-    "どう思",
-    "説明して",
-    "詳しく",
-    # request-shaped utterances ("〜して" / "〜しといて" / "〜お願い")
+    "why",
+    "explain",
+    "elaborate",
+    "opinion",
+    "think",
+    "details",
+    # request-shaped utterances ("please do X" / "can you X" / "could you X")
     # imply an action, and actions need tools. This is deliberately
-    # broad — false positives (「はじめまして」) just take the slower
-    # Hermes path, while a false negative makes the tool-less local
-    # model fake completed actions (observed live: STT mangled
-    # 「メモして」 into 「埋めまして」, slipped past the specific
-    # markers, and the local model claimed the memo was saved).
-    "して",
-    "といて",
-    "ちょうだい",
-    "頂戴",
-    "お願い",
+    # broad — false positives just take the slower Hermes path, while a
+    # false negative makes the tool-less local model fake completed
+    # actions (observed live: the local model claimed a memo was saved
+    # when the marker word was mangled by STT).
+    "please",
+    "can you",
+    "could you",
+    "would you",
     # needs SwitchBot / device tools (home-appliance control lives on
     # Hermes via the gateway's switchbot_* MCP tools; the local model
     # cannot call tools, so command-style utterances must not short-cut)
-    "つけて",
-    "点けて",
-    "消して",
-    "切って",
-    "電気",
-    "照明",
-    "エアコン",
-    "テレビ",
-    "温度",
-    "湿度",
-    "スイッチ",
-    "デバイス",
+    "turn on",
+    "turn off",
+    "switch",
+    "lights",
+    "light",
+    "aircon",
+    "tv",
+    "temperature",
+    "humidity",
+    "device",
 )
 
 #: Reasoning models (e.g. qwen3) wrap chain-of-thought in <think>
 #: tags; spoken output must never include them.
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
-_WEEKDAYS_JA = "月火水木金土日"
+_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 #: Substrings that mean the user is actually asking about the date or
 #: weekday. The date context is injected into the local prompt **only**
-#: when one of these matches the transcript — otherwise the 1.2B model
+#: when one of these matches the transcript — otherwise the small model
 #: is never told today's date, so it cannot blurt it out on vague turns
-#: (observed live: 「うっ」 → "…今日は2026年6月13日よ。…"). Matched after
+#: (observed live: "ugh" → "...today is 2026-06-13..."). Matched after
 #: NFKC normalisation, so full-width / half-width variants fold together.
 DATE_QUERY_MARKERS = (
-    "何日",
-    "なんにち",
-    "日付",
-    "日にち",
-    "何曜",
-    "なん曜",
-    "曜日",
-    "今日",
-    "きょう",
-    "本日",
+    "what date",
+    "what day",
+    "what's the date",
+    "what's today",
     "date",
     "today",
+    "weekday",
+    "day of the week",
 )
 
 
@@ -186,15 +182,17 @@ def decide_route(text: str) -> str:
 
 
 #: The local model cannot call tools. STT mis-transcriptions can strip
-#: the marker words that would have routed a tool request to Hermes
-#: (e.g. 「メモして」→「埋めまして」), and without this line the model
-#: happily claims to have saved memos or run searches it cannot run.
+#: the marker words that would have routed a tool request to Hermes,
+#: and without this line the model happily claims to have saved memos
+#: or run searches it cannot run.
 #: Asking back instead gives the user a natural retry, and the retried
 #: utterance usually transcribes well enough to route to Hermes.
 LOCAL_NO_TOOLS_LINE = (
-    "重要: あなたは道具が使えないので、実行・保存・記録・調査・操作は一切できません。"
-    "そういう依頼や、意味のよくわからない発話が来たら、内容をでっち上げず、"
-    "「ごめん、うまく聞き取れなかったみたい。もう一度言ってもらえる？」とだけ答えてください。"
+    "Important: you have no tools, so you cannot perform, save, record, "
+    "research, or operate anything. "
+    "If asked for such things, or if the utterance is unclear, do not make "
+    "anything up; reply only: "
+    "'Sorry, I did not catch that. Could you say it again?'"
 )
 
 
@@ -219,10 +217,9 @@ def _today_line(now: datetime.datetime | None = None) -> str:
     """
     if now is None:
         now = datetime.datetime.now()
-    weekday = _WEEKDAYS_JA[now.weekday()]
+    weekday = _WEEKDAYS[now.weekday()]
     return (
-        f"（参考情報：今日は{now.year}年{now.month}月{now.day}日"
-        f"({weekday}曜日)です。）"
+        f"(Today's date is {now.year}-{now.month}-{now.day}, {weekday}.)"
     )
 
 
@@ -250,10 +247,10 @@ async def ask_local(text: str, *, system_prompt: str) -> str:
     )
 
     # Inject today's date only when the user actually asks about it.
-    # The 1.2B model cannot reliably keep "don't mention this unless
+    # The small model cannot reliably keep "don't mention this unless
     # asked" context, so the only safe guard is to withhold the fact
-    # entirely on non-date turns (observed live: 「うっ」 → unsolicited
-    # "今日は2026年6月13日よ。").
+    # entirely on non-date turns (observed live: "ugh" → unsolicited
+    # "today is 2026-06-13").
     date_line = _today_line() if _is_date_query(text) else ""
     system_content = system_prompt + date_line + LOCAL_NO_TOOLS_LINE
 

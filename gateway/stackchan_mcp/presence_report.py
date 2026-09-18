@@ -316,8 +316,8 @@ def _recommendation(
         return {
             "current_absent_after_s": current_absent_after_s,
             "recommended_absent_after_s": None,
-            "rationale": "ACTIVE 帯の谷間サンプルが無く推奨値を算出できません"
-            "（在室データの蓄積を待ってください）。",
+            "rationale": "No ACTIVE-band valley samples to compute a recommendation; "
+            "wait for occupancy data to accumulate.",
             "false_absent_risk_at_recommended": 0,
             "censored_active_dropouts": 0,
             "auto_apply": False,
@@ -340,32 +340,37 @@ def _recommendation(
     # the current ceiling, so a higher recommendation covers them too).
     risk = sum(1 for v in active_valleys if v >= recommended)
     rationale = (
-        f"在室中に presence が戻った谷間（resolved, n={len(basis)}）の "
-        f"p99={p99:.0f}s に余裕係数 {RECO_MARGIN} を掛け {RECO_ROUND_S}s 丸めで "
-        f"{recommended}s。ACTIVE 谷間は現しきい値で打ち切られるため、戻り済みの"
-        "谷間のみを母数にしています（就寝帯は sleep latch が埋めるため除外）。"
+        f"Resolved valleys (presence returned, n={len(basis)}): "
+        f"p99={p99:.0f}s × margin {RECO_MARGIN}, rounded to {RECO_ROUND_S}s "
+        f"→ {recommended}s. ACTIVE valleys are cut off by the current "
+        "threshold, so only returned valleys are counted "
+        "(the sleep band is patched by the sleep latch)."
     )
     if censored:
         rationale += (
-            f" ACTIVE 中に {censored} 回、presence が現しきい値"
-            f"（{current_absent_after_s}s）まで途切れて不在判定されました"
-            "（真の離席かセンサー死角かは要観察）。"
+            f" During ACTIVE, presence dropped to the current threshold "
+            f"({current_absent_after_s}s) {censored} times before recovery and "
+            "was judged absent (real leave or a sensor blind spot — watch)."
         )
     if current_absent_after_s is not None and recommended:
         ratio = current_absent_after_s / recommended
         too_short_signal = censored >= max(5, len(active_valleys) // 10)
         if ratio >= 1.5:
             rationale += (
-                f" 現状 {current_absent_after_s}s は推奨の約 {ratio:.1f} 倍で"
-                "過剰に保守的（離席後 ABSENT までが遅い）。"
+                f" Current {current_absent_after_s}s is ~{ratio:.1f}× the "
+                "recommendation and overly conservative "
+                "(slow to mark ABSENT after a leave)."
             )
         elif too_short_signal:
             rationale += (
-                f" 現状 {current_absent_after_s}s では打ち切りが多く、"
-                "離席でなければしきい値が短すぎる可能性。"
+                f" Current {current_absent_after_s}s cuts off many valleys; "
+                "if it is not a real leave, the threshold is probably too short."
             )
         else:
-            rationale += f" 現状 {current_absent_after_s}s は推奨とほぼ整合。"
+            rationale += (
+                f" Current {current_absent_after_s}s is roughly aligned with "
+                "the recommendation."
+            )
     return {
         "current_absent_after_s": current_absent_after_s,
         "recommended_absent_after_s": recommended,
@@ -449,7 +454,7 @@ def build_report(
 def render_markdown(report: dict[str, Any]) -> str:
     """Render a report dict as a human-readable Markdown document."""
     if report.get("empty"):
-        return "# 在室診断レポート\n\nデータがありません（在室ログが空）。\n"
+        return "# Occupancy Diagnostic Report\n\nNo data (occupancy log is empty).\n"
     b = report["basic"]
     s = report["sampling"]
     st = report["states"]
@@ -458,49 +463,49 @@ def render_markdown(report: dict[str, Any]) -> str:
     vall = report["valleys"]
     rec = report["recommendation"]
     lines: list[str] = []
-    lines.append("# 在室診断レポート")
+    lines.append("# Occupancy Diagnostic Report")
     lines.append("")
-    lines.append(f"- 期間: {b['start_jst']} 〜 {b['end_jst']} JST（{b['duration_h']}h）")
-    lines.append(f"- サンプル数: {b['samples']}　鮮度: {b['stale_s']}s 前")
+    lines.append(f"- Period: {b['start_jst']} — {b['end_jst']} JST ({b['duration_h']}h)")
+    lines.append(f"- Samples: {b['samples']}   Freshness: {b['stale_s']}s ago")
     lines.append(
-        f"- サンプル間隔: 中央 {s['median_gap_s']}s / 最大 {s['max_gap_s']}s"
-        f"　欠測(>30s): {s['gaps_over_30s']} 件"
+        f"- Sample interval: median {s['median_gap_s']}s / max {s['max_gap_s']}s"
+        f"   Missing (>30s): {s['gaps_over_30s']} occurrences"
     )
     lines.append("")
-    lines.append("## state 別 滞在")
+    lines.append("## Time per state")
     for key in ("active", "quiet", "absent", "unknown"):
         d = st.get(key, {})
         lines.append(
             f"- {key}: {d.get('hours', 0)}h ({d.get('ratio', 0) * 100:.1f}%)"
             f" n={d.get('samples', 0)}"
         )
-    lines.append(f"- 遷移回数: {st.get('transitions', 0)}")
+    lines.append(f"- Transitions: {st.get('transitions', 0)}")
     lines.append("")
-    lines.append("## presence 分離度（在室判定の確かさ）")
-    lines.append(f"- 判定: **{sep['separation_note']}**")
+    lines.append("## Presence separation (reliability of occupancy judgment)")
+    lines.append(f"- Judgment: **{sep['separation_note']}**")
     lines.append(f"- pres_flag=True : {sep['on']}")
     lines.append(f"- pres_flag=False: {sep['off']}")
     lines.append("")
-    lines.append("## 在室中の谷間（presence 喪失の連続時間）")
+    lines.append("## Valleys during occupancy (continuous presence loss)")
     lines.append(
-        f"- 全体(active+quiet): n={vall['n']} median={vall['median_s']}s"
+        f"- All (active+quiet): n={vall['n']} median={vall['median_s']}s"
         f" p90={vall['p90_s']}s p99={vall['p99_s']}s max={vall['max_s']}s"
     )
     lines.append(
-        f"- ACTIVE 限定: n={va['n']} median={va['median_s']}s"
+        f"- ACTIVE only: n={va['n']} median={va['median_s']}s"
         f" p90={va['p90_s']}s p99={va['p99_s']}s max={va['max_s']}s"
-        f"（>450s: {va['over_450s']} 件）"
+        f"   (>450s: {va['over_450s']} occurrences)"
     )
     lines.append("")
-    lines.append("## 推奨 absent_after_s（提示のみ・自動適用しない）")
-    lines.append(f"- 現状: {rec['current_absent_after_s']}s")
-    lines.append(f"- 推奨: {rec['recommended_absent_after_s']}s")
+    lines.append("## Recommended absent_after_s (suggestion only — not auto-applied)")
+    lines.append(f"- Current: {rec['current_absent_after_s']}s")
+    lines.append(f"- Recommended: {rec['recommended_absent_after_s']}s")
     lines.append(
-        f"- 推奨採用時の誤 ABSENT リスク: {rec['false_absent_risk_at_recommended']} 件"
+        f"- False ABSENT risk if recommended adopted: {rec['false_absent_risk_at_recommended']} occurrences"
     )
     lines.append(
-        f"- ACTIVE 中の打ち切り（しきい値到達）: {rec.get('censored_active_dropouts', 0)} 回"
+        f"- ACTIVE cut-offs (threshold reached): {rec.get('censored_active_dropouts', 0)} times"
     )
-    lines.append(f"- 根拠: {rec['rationale']}")
+    lines.append(f"- Rationale: {rec['rationale']}")
     lines.append("")
     return "\n".join(lines) + "\n"

@@ -12,14 +12,14 @@ def _notes_dir(tmp_path, monkeypatch):
 
 
 def test_write_read_roundtrip():
-    result = notes.write_note("memo", "こんにちは")
+    result = notes.write_note("memo", "hello")
     assert result["ok"] is True
     assert result["name"] == "memo.md"  # bare name gets .md
 
     read = notes.read_note("memo.md")
-    assert read["content"] == "こんにちは"
+    assert read["content"] == "hello"
     # The bare name resolves to the same file.
-    assert notes.read_note("memo")["content"] == "こんにちは"
+    assert notes.read_note("memo")["content"] == "hello"
 
 
 def test_write_overwrites_by_default_and_appends_on_request():

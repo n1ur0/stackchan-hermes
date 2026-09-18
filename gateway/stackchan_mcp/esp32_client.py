@@ -381,7 +381,7 @@ class ESP32Manager:
         self.on_device_ready: Callable[[], Awaitable[None]] | None = None
         # Phase F (yorishiro fork): fired the instant a device-driven
         # listen capture starts recording (LCD tap / wake word / button),
-        # so the owning Gateway can flash the "きいてるよ" status text
+        # so the owning Gateway can flash the "I'm listening..." status text
         # immediately instead of waiting for the recording to finish,
         # upload, and decode. Wired the same way as on_device_ready.
         self.on_listen_started: Callable[[], Awaitable[None]] | None = None
@@ -674,7 +674,7 @@ class ESP32Manager:
                                 "session=%s mode=%s",
                                 session_id, data.get("mode", ""),
                             )
-                            # Phase F (yorishiro fork): flash "きいてるよ"
+                            # Phase F (yorishiro fork): flash "I'm listening..."
                             # at the earliest possible moment — the
                             # instant recording opens — rather than after
                             # the capture finishes, uploads, and decodes

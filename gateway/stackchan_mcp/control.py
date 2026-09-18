@@ -109,9 +109,9 @@ _CONVERSATION: deque[dict[str, Any]] = deque(maxlen=30)
 
 #: Status-text strings shown on the device during a voice turn. Kept
 #: here so the hermes bridge and the web-search hook share one source.
-STATUS_LISTENING = "きいてるよ"
-STATUS_THINKING = "考え中"
-STATUS_SEARCHING = "調べ中"
+STATUS_LISTENING = "I'm listening..."
+STATUS_THINKING = "Thinking..."
+STATUS_SEARCHING = "Searching..."
 STATUS_CLEAR = ""
 
 #: Firmware tool that renders a one-line status string under the

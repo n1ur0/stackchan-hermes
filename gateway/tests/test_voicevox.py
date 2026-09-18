@@ -31,7 +31,7 @@ def _build_handler(captured: list[dict]):
         if path == "/audio_query":
             return httpx.Response(
                 200,
-                json={"speedScale": 1.0, "kana": "ハロー", "_test": True},
+                json={"speedScale": 1.0, "kana": "hello", "_test": True},
             )
         if path == "/synthesis":
             wav = make_wav_bytes(
@@ -102,12 +102,12 @@ async def test_synthesize_calls_audio_query_then_synthesis():
         transport=transport,
     )
 
-    pcm = await engine.synthesize("こんにちは")
+    pcm = await engine.synthesize("hello")
 
     assert len(captured) == 2
     assert captured[0]["path"] == "/audio_query"
     assert captured[1]["path"] == "/synthesis"
-    assert captured[0]["params"]["text"] == "こんにちは"
+    assert captured[0]["params"]["text"] == "hello"
     assert captured[0]["params"]["speaker"] == str(DEFAULT_VOICEVOX_SPEAKER)
     assert captured[1]["params"]["speaker"] == str(DEFAULT_VOICEVOX_SPEAKER)
     assert isinstance(pcm, bytes)

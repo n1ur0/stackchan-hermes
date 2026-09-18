@@ -338,14 +338,14 @@ PRESENCE_REPORT_ENV = "STACKCHAN_PRESENCE_REPORT"
 #: entries flood the feed and duplicate the server tab's CC usage (Kenji's call,
 #: 2026-06-27), so leaving it out keeps it hidden.
 CRON_JOBS: Final[tuple[tuple[str, str], ...]] = (
-    ("/tmp/inbox-drain.log", "Inbox 整理"),
-    ("/tmp/build_moc.log", "MOC 構築"),
-    ("/tmp/build_notes_review.log", "ノートレビュー更新"),
-    ("/tmp/weekly-digest.log", "週次ダイジェスト"),
-    ("/tmp/notes-tidy.log", "ノート整理"),
-    ("/tmp/notes-tidy-suggest.log", "整理提案"),
-    ("/tmp/articles-recommend.log", "記事レコメンド"),
-    ("/tmp/self-reflect.log", "自己ふりかえり"),
+    ("/tmp/inbox-drain.log", "Inbox Drain"),
+    ("/tmp/build_moc.log", "MOC Build"),
+    ("/tmp/build_notes_review.log", "Notes Review Update"),
+    ("/tmp/weekly-digest.log", "Weekly Digest"),
+    ("/tmp/notes-tidy.log", "Notes Tidy"),
+    ("/tmp/notes-tidy-suggest.log", "Tidy Suggestions"),
+    ("/tmp/articles-recommend.log", "Article Recommend"),
+    ("/tmp/self-reflect.log", "Self-Reflect"),
 )
 #: Lower-cased substrings in a cron log's last line that mark a failed run.
 _CRON_ERROR_MARKERS: Final = (
@@ -390,7 +390,7 @@ def _list_presence_reports(limit: int, *, path: Path | None = None) -> list[dict
                 "kind": "daily_report",
                 "status": "ok",
                 "subtype": date,
-                "text": f"{date} の在室日次レポート",
+                "text": f"Daily occupancy report for {date}",
                 "detail": {"date": date},
             }
         )
@@ -816,7 +816,7 @@ def build_app(
 
     async def control_i2c(request: Request) -> JSONResponse:
         # Debug relay onto the Grove Port A I2C bus (yorishiro sensor
-        # bring-up, "道A"): probe new Port A sensors without a firmware
+        # bring-up, "Port A"): probe new Port A sensors without a firmware
         # change. Mirrors the MCP i2c_* tools over the control plane.
         # Body: {"op": "scan"|"read"|"write"|"write_read", ...args}.
         body = await _read_json_body(request)

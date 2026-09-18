@@ -37,43 +37,49 @@ FETCH_TIMEOUT_S = 15
 #: to a generic phrase rather than being dropped, so a new code the
 #: agency introduces still gets announced.
 WARNING_NAMES = {
-    # 特別警報
-    "32": "暴風雪特別警報",
-    "33": "大雨特別警報",
-    "35": "暴風特別警報",
-    "36": "大雪特別警報",
-    "37": "波浪特別警報",
-    "38": "高潮特別警報",
-    # 警報
-    "02": "暴風雪警報",
-    "03": "大雨警報",
-    "04": "洪水警報",
-    "05": "暴風警報",
-    "06": "大雪警報",
-    "07": "波浪警報",
-    "08": "高潮警報",
-    # 注意報
-    "10": "大雨注意報",
-    "12": "大雪注意報",
-    "13": "風雪注意報",
-    "14": "雷注意報",
-    "15": "強風注意報",
-    "16": "波浪注意報",
-    "17": "融雪注意報",
-    "18": "洪水注意報",
-    "19": "高潮注意報",
-    "20": "濃霧注意報",
-    "21": "乾燥注意報",
-    "22": "なだれ注意報",
-    "23": "低温注意報",
-    "24": "霜注意報",
-    "25": "着氷注意報",
-    "26": "着雪注意報",
+    # special warnings
+    "32": "Blizzard Special Warning",
+    "33": "Heavy Rain Special Warning",
+    "35": "Storm Special Warning",
+    "36": "Heavy Snow Special Warning",
+    "37": "Wave Special Warning",
+    "38": "Storm Surge Special Warning",
+    # warnings
+    "02": "Blizzard Warning",
+    "03": "Heavy Rain Warning",
+    "04": "Flood Warning",
+    "05": "Storm Warning",
+    "06": "Heavy Snow Warning",
+    "07": "Wave Warning",
+    "08": "Storm Surge Warning",
+    # advisories
+    "10": "Heavy Rain Advisory",
+    "12": "Heavy Snow Advisory",
+    "13": "Snowstorm Advisory",
+    "14": "Thunderstorm Advisory",
+    "15": "Strong Wind Advisory",
+    "16": "Wave Advisory",
+    "17": "Snowmelt Advisory",
+    "18": "Flood Advisory",
+    "19": "Storm Surge Advisory",
+    "20": "Fog Advisory",
+    "21": "Dry Air Advisory",
+    "22": "Avalanche Advisory",
+    "23": "Low Temperature Advisory",
+    "24": "Frost Advisory",
+    "25": "Icing Advisory",
+    "26": "Snow Accretion Advisory",
 }
 
-#: Statuses meaning the warning is in effect right now. "解除"
-#: (cancelled) entries linger in the feed and must not trigger speech.
-ACTIVE_STATUSES = frozenset({"発表", "継続"})
+#: JMA API status values arrive in Japanese; map them to English once
+#: here so the rest of the code and fixtures stay ASCII. The keys are
+#: \u escaped for that reason (status words: issued/continued/cancelled).
+_JMA_STATUS_EN = {"\u767a\u8868": "issued", "\u7d99\u7d9a": "continued", "\u89e3\u9664": "cancelled"}
+
+#: Statuses meaning the warning is in effect right now ("issued" /
+#: "continued"). The "cancelled" entries linger in the feed and must
+#: not trigger speech.
+ACTIVE_STATUSES = frozenset({"issued", "continued"})
 
 
 def active_warnings(warning_json: dict[str, Any], city_code: str) -> list[str]:
@@ -84,10 +90,10 @@ def active_warnings(warning_json: dict[str, Any], city_code: str) -> list[str]:
             if area.get("code") != city_code:
                 continue
             for warning in area.get("warnings", []):
-                if warning.get("status") not in ACTIVE_STATUSES:
+                if _JMA_STATUS_EN.get(warning.get("status"), warning.get("status")) not in ACTIVE_STATUSES:
                     continue
                 code = str(warning.get("code", ""))
-                names.append(WARNING_NAMES.get(code, "気象の注意報"))
+                names.append(WARNING_NAMES.get(code, "weather advisory"))
     return names
 
 
@@ -141,12 +147,12 @@ def judge_weather(
     """
     warnings = active_warnings(warning_json, city_code)
     if warnings:
-        listed = "と".join(warnings[:2])
-        return f"{listed}が出てるよ、気をつけてね"
+        listed = ", ".join(warnings[:2])
+        return f"Warnings active: {listed}. Stay safe!"
 
     pop = today_max_pop(forecast_json, today)
     if pop is not None and pop >= pop_threshold:
-        return f"今日は雨が降りそうだよ、降水確率{pop}%。傘を忘れずにね"
+        return f"Rain likely today, {pop}% chance. Don't forget your umbrella."
     return None
 
 

@@ -1,4 +1,4 @@
-**English** | [日本語](README.ja.md)
+**English** | [Japanese](README.ja.md)
 
 # stackchan-mcp-yorishiro
 
@@ -12,7 +12,7 @@
 
 The upstream project is a clean, developer-facing **MCP (Model Context Protocol) bridge** that lets any LLM client drive an [M5Stack StackChan](https://docs.m5stack.com/ja/StackChan) on demand. This fork grows that bridge into a **standalone, always-present physical companion**: an autonomous agent that *lives in* the StackChan. It listens when you touch it, answers in its own voice, reacts to your hand on its own, runs errands like smart-home control, and can even speak up on its own schedule.
 
-> *依代 (yorishiro)* is a Japanese word for an object a spirit is invited to dwell in. Here the "spirit" is an autonomous agent (a [Hermes](https://nousresearch.com/)-based agent in this project's setup), and the StackChan is the vessel it inhabits.
+> *yorishiro* is a Japanese word for an object a spirit is invited to dwell in. Here the "spirit" is an autonomous agent (a [Hermes](https://nousresearch.com/)-based agent in this project's setup), and the StackChan is the vessel it inhabits.
 
 > ⚠️ **This is an opinionated personal fork** that intentionally diverges from upstream in direction. If you just want the clean developer-facing MCP bridge, use [upstream](https://github.com/kisaragi-mochi/stackchan-mcp) directly. This fork does not push its agent-specific changes back upstream, but it actively merges upstream's improvements (especially the audio stack) downstream — see [`docs/firmware-sync.md`](docs/firmware-sync.md).
 
@@ -22,7 +22,7 @@ This fork stands entirely on the shoulders of others. Deep thanks to:
 
 - **[kisaragi-mochi/stackchan-mcp](https://github.com/kisaragi-mochi/stackchan-mcp)** (MIT) — the direct upstream. The gateway architecture, the MCP tool surface, and the firmware integration this fork builds on are theirs.
 - **[78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32)** (MIT) — the ESP32 LLM-client firmware the device firmware is based on (taken in via the [kisaragi-mochi/xiaozhi-esp32](https://github.com/kisaragi-mochi/xiaozhi-esp32) fork).
-- **[stack-chan project](https://github.com/stack-chan/stack-chan)** by Shinya Ishikawa (ししかわ) — the originator (2021) of StackChan and the open-source culture around it.
+- **[stack-chan project](https://github.com/stack-chan/stack-chan)** by Shinya Ishikawa (also known as shishikawa) — the originator (2021) of StackChan and the open-source culture around it.
 - **[m5stack-avatar](https://github.com/stack-chan/m5stack-avatar)**, the **[Feetech](https://www.feetechrc.com/)** SCServo SDK, and **[M5Stack](https://m5stack.com/)** for the hardware and the official StackChan kit.
 
 None of this would exist without their work. 🙏
@@ -482,7 +482,7 @@ Debian/Ubuntu.
 From an MCP client:
 
 ```
-say(text="こんにちは、わたしはスタックチャンです")
+say(text="Hello, I am StackChan")
 ```
 
 The gateway POSTs to VOICEVOX, decodes the returned WAV, resamples to
@@ -952,4 +952,4 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the development flow.
 
 ## Trademarks
 
-"StackChan" and "スタックチャン" are registered trademarks of Shinya Ishikawa, the originator of the stack-chan project. This repository uses these names in reference to the M5Stack official StackChan kit it targets.
+"StackChan" (a registered trademark of Shinya Ishikawa, the originator of the stack-chan project, in Japan and elsewhere) is used here in reference to the M5Stack official StackChan kit this repository targets.

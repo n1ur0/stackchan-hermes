@@ -54,13 +54,13 @@ from dataclasses import dataclass
 
 from . import local_llm
 
-#: Reply suffixes that invite a follow-up answer (ASCII + full-width).
-_CONTINUE_SUFFIXES = ("?", "？")
+#: Reply suffixes that invite a follow-up answer.
+_CONTINUE_SUFFIXES = ("?",)
 
 #: Subtitle shown when a hands-free chain stops only because it hit the
 #: per-conversation turn ceiling on a still-open question. A gentle nudge
 #: instead of falling silent mid-question (Phase 3 UX).
-TAP_TO_CONTINUE_HINT = "タップして続けてね"
+TAP_TO_CONTINUE_HINT = "Tap to continue"
 
 DEFAULT_MAX_TURNS = 4
 DEFAULT_SESSION_TIMEOUT_S = 60

@@ -491,7 +491,7 @@ class PresenceMonitor:
         # Reflect the change immediately (e.g. a shorter debounce may flip
         # the room to ABSENT now, or a new window may switch ACTIVE<->QUIET).
         # notify=False: a dashboard re-tune is not a real occupancy event,
-        # so it must not trigger a proactive "おかえり"/"おはよう".
+        # so it must not trigger a proactive "welcome back"/"good morning".
         self._set_state(self._derive_state(), notify=False)
         return {
             "ok": True,

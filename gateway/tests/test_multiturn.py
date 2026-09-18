@@ -12,14 +12,14 @@ from stackchan_mcp.multiturn import MultiturnSession, should_continue
 @pytest.mark.parametrize(
     "reply,expected",
     [
-        ("元気にしてた？", True),
+        ("how have you been?", True),
         ("How are you?", True),
-        ("今日はどうだった？  ", True),  # trailing whitespace ignored
-        ("そうなんだ。", False),
-        ("いいね！", False),
+        ("how was today?  ", True),  # trailing whitespace ignored
+        ("I see.", False),
+        ("nice!", False),
         ("", False),
         ("?", True),
-        ("？", True),
+        ("\uff1f", False),  # full-width question mark no longer continues
     ],
 )
 def test_reply_invites_continuation(reply, expected):
@@ -194,7 +194,7 @@ def _base(**over):
     kw = dict(
         enabled=True,
         route="hermes",
-        reply="元気？",
+        reply="how are you?",
         turn_count=0,
         max_turns=4,
         device_connected=True,
@@ -218,7 +218,7 @@ def test_should_continue_local_route_excluded():
 
 
 def test_should_continue_needs_question_mark():
-    assert should_continue(**_base(reply="そうだね。")) is False
+    assert should_continue(**_base(reply="right.")) is False
 
 
 def test_should_continue_respects_ceiling():

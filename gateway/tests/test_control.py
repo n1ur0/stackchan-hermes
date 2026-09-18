@@ -342,16 +342,16 @@ async def test_apply_persisted_volume_skips_when_disconnected(monkeypatch):
 @pytest.mark.asyncio
 async def test_set_status_text_sends_when_connected():
     gw = FakeGateway()
-    await control.set_device_status_text(gw, "考え中")
+    await control.set_device_status_text(gw, "Thinking...")
     assert gw.esp32.calls == [
-        ("self.display.set_status_text", {"text": "考え中"})
+        ("self.display.set_status_text", {"text": "Thinking..."})
     ]
 
 
 @pytest.mark.asyncio
 async def test_set_status_text_noop_when_disconnected():
     gw = FakeGateway(connected=False)
-    await control.set_device_status_text(gw, "考え中")
+    await control.set_device_status_text(gw, "Thinking...")
     assert gw.esp32.calls == []
 
 
@@ -413,9 +413,9 @@ async def test_trigger_listen_no_device():
 @pytest.mark.asyncio
 async def test_set_subtitle_sends_when_connected():
     gw = FakeGateway()
-    await control.set_device_subtitle(gw, "こんにちは")
+    await control.set_device_subtitle(gw, "hello")
     assert gw.esp32.calls == [
-        ("self.display.set_subtitle", {"text": "こんにちは"})
+        ("self.display.set_subtitle", {"text": "hello"})
     ]
 
 
@@ -920,13 +920,13 @@ def test_conversation_empty_by_default():
 
 
 def test_record_conversation_turn_appends():
-    control.record_conversation_turn("こんにちは", "やあ", "local", {"total": 500})
+    control.record_conversation_turn("hello", "hey", "local", {"total": 500})
     result = control.get_conversation()
     assert result["ok"] is True
     assert len(result["turns"]) == 1
     turn = result["turns"][0]
-    assert turn["transcript"] == "こんにちは"
-    assert turn["reply"] == "やあ"
+    assert turn["transcript"] == "hello"
+    assert turn["reply"] == "hey"
     assert turn["route"] == "local"
     assert turn["timings_ms"] == {"total": 500}
     assert isinstance(turn["ts"], float)
@@ -1012,12 +1012,12 @@ class _FakeRunner:
 
 @pytest.mark.asyncio
 async def test_save_preset_writes_sanitized_file(tmp_path):
-    result = await control.save_preset("おやすみ", _sample_snapshot())
-    assert result == {"ok": True, "preset": "おやすみ"}
-    path = tmp_path / "presets" / "おやすみ.json"
+    result = await control.save_preset("sleep", _sample_snapshot())
+    assert result == {"ok": True, "preset": "sleep"}
+    path = tmp_path / "presets" / "sleep.json"
     assert path.exists()
     data = json.loads(path.read_text("utf-8"))
-    assert data["name"] == "おやすみ"
+    assert data["name"] == "sleep"
     settings = data["settings"]
     assert settings["volume"] == 65
     assert settings["proximity"] == {"mode": "listen", "threshold": 700}

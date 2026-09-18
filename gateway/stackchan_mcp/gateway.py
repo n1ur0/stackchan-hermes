@@ -62,7 +62,8 @@ class Gateway:
         # and gates the heartbeat (never greet an empty room). Opt-in via
         # STACKCHAN_PRESENCE_POLL_SEC; from_env returns None when unset.
         self._presence: PresenceMonitor | None = None
-        # Phase D core (yorishiro fork): the Hermes 自発判断層. Subscribes
+        # Phase D core (yorishiro fork): the Hermes autonomous judgment
+        # layer. Subscribes
         # to presence transitions and speaks one Hermes-authored line on a
         # meaningful flip (returning resident / morning wake). Opt-in via
         # STACKCHAN_PROACTIVE; from_env returns None when unset.
@@ -78,12 +79,12 @@ class Gateway:
         # (speaker volume / mute) once a (re)connected device finishes
         # MCP init. Wired the same way as on_human_interaction above.
         self.esp32.on_device_ready = self._on_device_ready
-        # Phase F (yorishiro fork): show "きいてるよ" the instant a
+        # Phase F (yorishiro fork): show "I'm listening..." the instant a
         # device-driven listen starts recording, not after the capture
         # uploads and decodes. Wired the same way as the callbacks above.
         self.esp32.on_listen_started = self._on_listen_started
         # Phase F (yorishiro fork): True while a voice turn is in flight.
-        # The status-text feedback (and the web_search "調べ中" hook) read
+        # The status-text feedback (and the web_search "Searching..." hook) read
         # this so they only touch the device display during a real turn,
         # never for Claude-Desktop-driven tool calls.
         self.voice_turn_active = False
@@ -120,7 +121,7 @@ class Gateway:
         """Device-driven listen began — flash the listening status now.
 
         Pushed the instant recording opens (LCD tap / wake word / button)
-        so "きいてるよ" appears with the tap instead of one beat late.
+        so "I'm listening..." appears with the tap instead of one beat late.
         The hermes bridge re-sends the same status when the capture
         arrives; the double send is harmless (idempotent display update).
 

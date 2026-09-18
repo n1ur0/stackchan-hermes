@@ -877,7 +877,7 @@ class _FakeNotificationSession:
         )
 
 
-# ---- Phase F: set_status_text tool + voice-turn 調べ中 hook -----------
+# ---- Phase F: set_status_text tool + voice-turn Searching... hook -----------
 
 
 @pytest.mark.asyncio
@@ -913,15 +913,15 @@ async def test_set_status_text_relays_to_device():
         esp32 = FakeESP32()
 
     content = await stdio_server._dispatch_mcp_tool(
-        "set_status_text", {"text": "考え中"}, FakeGateway()
+        "set_status_text", {"text": "Thinking..."}, FakeGateway()
     )
-    assert calls == [("self.display.set_status_text", {"text": "考え中"})]
+    assert calls == [("self.display.set_status_text", {"text": "Thinking..."})]
     assert content  # non-empty TextContent list
 
 
 @pytest.mark.asyncio
 async def test_web_search_shows_searching_during_voice_turn(monkeypatch):
-    """During a voice turn, web_search flips the device status to 調べ中."""
+    """During a voice turn, web_search flips the device status to Searching...."""
     status_calls = []
 
     async def fake_search(query, max_results=None):
@@ -939,7 +939,7 @@ async def test_web_search_shows_searching_during_voice_turn(monkeypatch):
         voice_turn_active = True
 
     await stdio_server._dispatch_mcp_tool(
-        "web_search", {"query": "天気"}, FakeGateway()
+        "web_search", {"query": "weather"}, FakeGateway()
     )
     assert status_calls == [stdio_server.control.STATUS_SEARCHING]
 
@@ -964,6 +964,6 @@ async def test_web_search_no_status_outside_voice_turn(monkeypatch):
         voice_turn_active = False
 
     await stdio_server._dispatch_mcp_tool(
-        "web_search", {"query": "天気"}, FakeGateway()
+        "web_search", {"query": "weather"}, FakeGateway()
     )
     assert status_calls == []

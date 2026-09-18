@@ -1,7 +1,7 @@
 """Proactive speaker: state-transition-driven autonomous speech (Phase D core).
 
 yorishiro fork specific module (not intended for upstream PR) — the
-"Hermes 自発判断層".
+"Hermes autonomous judgment layer".
 
 :mod:`presence` observes occupancy *mechanically* and fires
 ``register_on_state_change`` on a real flip. This module is the judgment
@@ -46,10 +46,10 @@ Environment variables (all inert unless STACKCHAN_PROACTIVE is set):
 - ``STACKCHAN_PROACTIVE_QUIET`` — quiet hours ``"HH:MM-HH:MM"`` / ``"off"``.
   Default ``"22:00-06:30"``.
 - ``STACKCHAN_PROACTIVE_DAY_PRESET`` — mode preset applied when the room
-  becomes active (wake / return home). Default ``"つうじょう"``. Empty
+  becomes active (wake / return home). Default ``"normal"``. Empty
   disables the day-mode switch (greeting only).
 - ``STACKCHAN_PROACTIVE_NIGHT_PRESET`` — mode preset applied when the room
-  goes quiet for the night. Default ``"おやすみ"``. Empty disables the
+  goes quiet for the night. Default ``"sleep"``. Empty disables the
   night-mode switch (greeting only).
 - ``STACKCHAN_PROACTIVE_MODE_DELAY_S`` — seconds of pause between the
   greeting and the mode switch (a natural beat). Default 1.5. ``0`` makes
@@ -58,7 +58,7 @@ Environment variables (all inert unless STACKCHAN_PROACTIVE is set):
   ``~/.stackchan/proactive_state.json``.
 
 Mode auto-switch: each speaking transition can also re-apply one of the
-dashboard mode presets (the same ``おやすみ``/``つうじょう`` cards the user
+dashboard mode presets (the same ``sleep``/``normal`` cards the user
 saves). The greeting and the mode switch are ordered so a mute never
 swallows the line: going quiet for the night speaks *then* applies the
 muting night preset; becoming active applies the un-muting day preset
@@ -99,22 +99,23 @@ DEFAULT_STATE_PATH = "~/.stackchan/proactive_state.json"
 #: Seconds of pause between the greeting and the mode switch. A beat makes
 #: the transition feel natural — the line lands, then the screen dims (or
 #: brightens) rather than snapping the instant the speech ends. Tuned on
-#: hardware (ケンジ feedback 2026-06-24: an immediate mute felt abrupt).
+#: hardware (Kenji feedback 2026-06-24: an immediate mute felt abrupt).
 DEFAULT_MODE_DELAY_S = 1.5
 
 #: Mode presets re-applied on the day/night transitions. These match the
-#: dashboard "モード" cards the user saves; overridable via env so a rename
+#: dashboard "mode" cards the user saves; overridable via env so a rename
 #: (or an empty string to disable a side of the switch) needs no code change.
-DEFAULT_DAY_PRESET = "つうじょう"
-DEFAULT_NIGHT_PRESET = "おやすみ"
+DEFAULT_DAY_PRESET = "normal"
+DEFAULT_NIGHT_PRESET = "sleep"
 
 #: System prompt for a proactive utterance. Deliberately *not* the voice
 #: chat prompt (DEFAULT_VOICE_SYSTEM_PROMPT): no question, exactly one
 #: line — this is a greeting, not the start of a conversation.
 PROACTIVE_SYSTEM_PROMPT = (
-    "あなたは小型ロボット「スタックチャン」です。"
-    "これから伝える状況に対して、短く自然に一言だけ声をかけてください。"
-    "質問はせず、1文だけにしてください。記号・絵文字・箇条書きは使わないでください。"
+    "You are StackChan, a small robot. "
+    "For the situation you will be told, speak one short, natural line. "
+    "No questions; exactly one sentence. "
+    "No symbols, emoji, or bullet lists."
 )
 
 
@@ -130,7 +131,7 @@ class _Transition:
     re-apply alongside the greeting; ``preset_first`` orders the apply
     relative to the speech so a muting preset never swallows the line.
     ``exempt_quiet_hours`` lets the night greeting fire *inside* the quiet
-    window (``おやすみ`` *is* the night line — suppressing it would be
+    window (``sleep`` *is* the night line — suppressing it would be
     self-defeating).
     """
 
@@ -152,7 +153,7 @@ _ALL_TRANSITIONS: tuple[_Transition, ...] = (
         "absent_active",
         PresenceState.ABSENT,
         PresenceState.ACTIVE,
-        "誰もいなかった部屋に人が戻ってきました",
+        "Someone just came back into the room",
         preset_role="day",  # restore the un-muting day mode, then greet
         preset_first=True,
     ),
@@ -160,16 +161,16 @@ _ALL_TRANSITIONS: tuple[_Transition, ...] = (
         "quiet_active",
         PresenceState.QUIET,
         PresenceState.ACTIVE,
-        "朝になって、部屋の人が起きて活動を始めたようです",
-        preset_role="day",  # un-mute / brighten first, then "おはよう"
+        "It's morning and the person in the room seems to be awake and active",
+        preset_role="day",  # un-mute / brighten first, then "good morning"
         preset_first=True,
     ),
     _Transition(
         "active_quiet",
         PresenceState.ACTIVE,
         PresenceState.QUIET,
-        "夜になって、そろそろ就寝の時間のようです",
-        preset_role="night",  # speak "おやすみ" first, *then* mute / dim
+        "It's night and it's about time to wind down for bed",
+        preset_role="night",  # speak "good night" first, *then* mute / dim
         preset_first=False,
         exempt_quiet_hours=True,  # fires at the start of the quiet window
     ),
@@ -312,9 +313,9 @@ class ProactiveSpeaker:
 
         # Order the mode switch around the speech so a muting preset never
         # swallows the line: day transitions un-mute first then greet; the
-        # night transition speaks "おやすみ" first then mutes / dims. A short
+        # night transition speaks "good night" first then mutes / dims. A short
         # beat between the two (only when a preset actually applies) keeps it
-        # from snapping the instant the speech ends — ケンジ found an
+        # from snapping the instant the speech ends — Kenji found an
         # immediate mute jarring (2026-06-24).
         preset = self._preset_for(transition)
         if transition.preset_first:
@@ -397,7 +398,7 @@ class ProactiveSpeaker:
 
         Copied rather than shared: the heartbeat's guards bind to its own
         instance state, and refactoring them would churn passing tests.
-        ``transition.exempt_quiet_hours`` lets the night "おやすみ" line fire
+        ``transition.exempt_quiet_hours`` lets the night "good night" line fire
         inside the quiet window (it is itself the night greeting).
         """
         gw = self._gateway
@@ -460,8 +461,8 @@ class ProactiveSpeaker:
     def _situation(self, transition: _Transition) -> str:
         now = self._now().strftime("%H:%M")
         return (
-            f"（状況: {transition.situation}。今は {now} です）"
-            "短く自然に、一言だけ声をかけてください。"
+            f"(Situation: {transition.situation}. It is now {now}.)"
+            "Speak one short, natural line."
         )
 
     # ---- speech + state --------------------------------------------

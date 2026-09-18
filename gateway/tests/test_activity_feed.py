@@ -93,28 +93,28 @@ def test_read_cron_runs_mtime_tail_and_status(tmp_path):
     err_log.write_text("ran fine\nPermission denied\n", "utf-8")
     os.utime(err_log, (700.0, 700.0))
 
-    jobs = ((str(ok_log), "Inbox 整理"), (str(err_log), "ノート整理"))
+    jobs = ((str(ok_log), "Inbox Drain"), (str(err_log), "notes tidy"))
     items = _read_cron_runs(jobs)
     by_label = {it["subtype"]: it for it in items}
 
-    assert by_label["Inbox 整理"]["ts_unix"] == 500.0
-    assert by_label["Inbox 整理"]["source"] == "cron"
-    assert by_label["Inbox 整理"]["kind"] == "run"
-    assert by_label["Inbox 整理"]["status"] == "ok"
-    assert by_label["Inbox 整理"]["text"] == "=== inbox-drain done: new=3 ==="
+    assert by_label["Inbox Drain"]["ts_unix"] == 500.0
+    assert by_label["Inbox Drain"]["source"] == "cron"
+    assert by_label["Inbox Drain"]["kind"] == "run"
+    assert by_label["Inbox Drain"]["status"] == "ok"
+    assert by_label["Inbox Drain"]["text"] == "=== inbox-drain done: new=3 ==="
     # An error marker in the last line flags the run.
-    assert by_label["ノート整理"]["status"] == "error"
+    assert by_label["notes tidy"]["status"] == "error"
 
 
 def test_read_cron_runs_skips_missing_log(tmp_path):
     present = tmp_path / "build_moc.log"
     present.write_text("written index.md\n", "utf-8")
     jobs = (
-        (str(present), "MOC 構築"),
-        (str(tmp_path / "never-ran.log"), "週次ダイジェスト"),
+        (str(present), "MOC Build"),
+        (str(tmp_path / "never-ran.log"), "Weekly Digest"),
     )
     items = _read_cron_runs(jobs)
-    assert {it["subtype"] for it in items} == {"MOC 構築"}
+    assert {it["subtype"] for it in items} == {"MOC Build"}
 
 
 def test_gather_includes_cron(monkeypatch, tmp_path):
@@ -124,7 +124,7 @@ def test_gather_includes_cron(monkeypatch, tmp_path):
     cron_log.write_text("=== self-reflect done ===\n", "utf-8")
     os.utime(cron_log, (200.0, 200.0))
     monkeypatch.setattr(
-        http_server, "CRON_JOBS", ((str(cron_log), "自己ふりかえり"),)
+        http_server, "CRON_JOBS", ((str(cron_log), "Self-Reflect"),)
     )
 
     merged = _gather_activity(80, None)

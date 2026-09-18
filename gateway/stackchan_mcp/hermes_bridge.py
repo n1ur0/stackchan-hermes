@@ -88,9 +88,10 @@ def _clamp_reply_for_voice(reply: str) -> str:
 #: Spoken replies must stay short — they are synthesised and played on
 #: a 1 W speaker, and long monologues kill the conversation rhythm.
 DEFAULT_VOICE_SYSTEM_PROMPT = (
-    "あなたは小型ロボット「スタックチャン」として音声で会話しています。"
-    "ユーザーの発話は音声認識の結果なので、多少の誤認識は文脈から補ってください。"
-    "返答は話し言葉で短く、1〜3文にまとめてください。記号や箇条書きは使わないでください。"
+    "You are StackChan, a small robot talking by voice. "
+    "The user's speech comes from speech recognition, so fill in slight "
+    "misrecognitions from context. Reply in short, spoken language, "
+    "1-3 sentences. No symbols or bullet lists."
 )
 
 #: Tool-routing guidance appended to the voice system prompt. The
@@ -101,11 +102,11 @@ DEFAULT_VOICE_SYSTEM_PROMPT = (
 #: (blocked pending approval) instead of the MCP web_search tool, and
 #: a memo request was reported "added" without any tool call at all.
 HERMES_VOICE_TOOLS_LINE = (
-    "調べ物・天気・ニュースは必ず MCP ツールの web_search を使ってください。"
-    "メモやリストの保存は write_note（追記は append=true）、"
-    "内容の確認は list_notes / read_note、家電操作は switchbot_* ツールを使ってください。"
-    "terminal など他の手段は使わないでください。"
-    "ツールを呼ばずに「やりました」「調べました」と報告することは禁止です。"
+    "For research, weather, or news, always use the web_search MCP tool. "
+    "Save memos and lists with write_note (append=true to add), check "
+    "content with list_notes / read_note, control appliances with "
+    "switchbot_* tools. Do not use other means such as terminal. "
+    "Reporting 'done' or 'checked' without calling a tool is forbidden."
 )
 
 #: Hard ceiling for one Hermes turn. The agent may run tools internally;
@@ -301,7 +302,7 @@ async def handle_voice_turn(request: web.Request) -> web.Response:
     gateway.note_human_interaction()
 
     # Phase F: mark the turn in flight so device-side tools (web_search)
-    # can show a "調べ中" status, and always clear the status text +
+    # can show a "Searching..." status, and always clear the status text +
     # flag in the finally below so the display never gets stuck.
     gateway.voice_turn_active = True
 
@@ -446,8 +447,8 @@ async def _run_voice_turn(
             status=503,
         )
     # Phase F: the capture already finished (audio arrives post-record),
-    # so "きいてるよ" reads naturally at the start of recognition; flip
-    # to "考え中" the moment STT is done and the brain takes over.
+    # so "I'm listening..." reads naturally at the start of recognition; flip
+    # to "Thinking..." the moment STT is done and the brain takes over.
     await control.set_device_status_text(gateway, control.STATUS_LISTENING)
     # Phase 2 LED: show the "listening" colour through STT (self-
     # contained; on_listen_started already set it for device listens).

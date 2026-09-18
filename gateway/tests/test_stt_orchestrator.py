@@ -24,7 +24,7 @@ from stackchan_mcp.stt.audio_utils import DEVICE_FRAME_DURATION_MS, DEVICE_SAMPL
 class _CapturingEngine(STTEngine):
     """Engine that returns fixed text and records what it received."""
 
-    def __init__(self, text: str = "こんにちは", name: str = "faster-whisper") -> None:
+    def __init__(self, text: str = "hello", name: str = "faster-whisper") -> None:
         self.name = name
         self._text = text
         self.calls: list[tuple[bytes, dict[str, Any]]] = []
@@ -162,7 +162,7 @@ async def test_pipeline_drives_listen_state_and_returns_text(fake_decode, monkey
 
     monkeypatch.setattr(orchestrator.asyncio, "sleep", fast_sleep)
 
-    engine = _CapturingEngine(text="やっほー")
+    engine = _CapturingEngine(text="yaho")
     frames = [b"opus_frame_0", b"opus_frame_1", b"opus_frame_2"]
     esp32 = _FakeESP32(frames_to_inject=frames)
     gateway = _FakeGateway(esp32)
@@ -182,7 +182,7 @@ async def test_pipeline_drives_listen_state_and_returns_text(fake_decode, monkey
     assert esp32.listen_states[1] == ("stop", None)
 
     assert result["engine"] == "faster-whisper"
-    assert result["text"] == "やっほー"
+    assert result["text"] == "yaho"
     assert result["language"] == "ja"
     assert result["frame_count"] == 3
     assert result["duration_ms"] == 3 * DEVICE_FRAME_DURATION_MS

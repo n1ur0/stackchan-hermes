@@ -28,11 +28,11 @@ from stackchan_mcp.local_llm import (
 @pytest.mark.parametrize(
     "text",
     [
-        "おはよう",
-        "こんにちは、元気？",
-        "今日は何曜日？",
-        "ありがとう",
-        "おやすみなさい",
+        "good morning",
+        "hello, how are you?",
+        "what day is today?",
+        "thank you",
+        "go to sleep",
     ],
 )
 def test_decide_route_short_simple_goes_local(text):
@@ -43,34 +43,35 @@ def test_decide_route_short_simple_goes_local(text):
 @pytest.mark.parametrize(
     "text",
     [
-        "明日の天気を教えて",
-        "最新のニュースある？",
-        "ESP32のOpusエンコードについて調べて",
-        "今週の予定どうなってる？",
-        "なぜ空は青いの？",
-        "どうしてそうなるの？",
-        "この件についてどう思う？",
-        "リマインドしておいて",
-        "さっき話したこと覚えてる？あ、覚えておいてって意味ね",
+        "what's the weather tomorrow",
+        "any latest news?",
+        "look up ESP32 Opus encoding",
+        "how does my schedule look this week?",
+        "why is the sky blue?",
+        "explain why that happens",
+        "what's your opinion on this?",
+        "remind me later",
+        "do you remember what we talked about?",
         # appliance control needs the gateway's switchbot_* tools, which
         # only Hermes can call — short command phrases must not go local
-        "電気をつけて",
-        "リビングの照明消して",
-        "エアコン切って",
-        "テレビつけて",
-        "SwitchBotのデバイス一覧見せて",
-        # notes / web_search tools (Phase D) live on Hermes too; "メモ"
-        # and "リスト" also catch common STT mangling of those requests
-        # (e.g. 「買い物リストに牛乳をメモして」→「ハイモノリストに…」)
-        "買い物リストに牛乳をメモして",
-        "ハイモノリストに輸入を埋めまして",
-        "メモを読んで",
+        "turn on the lights",
+        "turn off the living room lights",
+        "turn off the aircon",
+        "turn on the TV",
+        "show the SwitchBot devices",
+        # notes / web_search tools (Phase D) live on Hermes too; "memo"
+        # and "list" also catch common STT mangling of those requests
+        # (e.g. "add milk to the shopping list and make a memo" →
+        #  "please note the milk")
+        "add milk to the shopping list and make a memo",
+        "please note that down for me",
+        "read my memo",
         # request-shaped utterances imply actions, and actions need
         # tools — including STT-mangled forms that lost their original
         # marker word (observed live in the Phase D2 E2E)
-        "牛乳を埋めまして",
-        "それ保存しといて",
-        "電源を入れてお願い",
+        "please jot milk down",
+        "please save that",
+        "turn on the device, please",
     ],
 )
 def test_decide_route_markers_go_hermes(text):
@@ -80,16 +81,16 @@ def test_decide_route_markers_go_hermes(text):
 
 def test_decide_route_long_text_goes_hermes():
     """Past LOCAL_MAX_CHARS the turn carries real content — Hermes."""
-    text = "あのね、" + "今日いろいろあってさ、" * 5 + "聞いてくれる？"
+    text = "so, " + "today a lot of things happened, " * 5 + "listen?"
     assert len(text) > LOCAL_MAX_CHARS
     assert decide_route(text) == ROUTE_HERMES
 
 
 def test_decide_route_boundary_length():
     """Exactly LOCAL_MAX_CHARS chars is still local; one more is not."""
-    at_limit = "あ" * LOCAL_MAX_CHARS
+    at_limit = "a" * LOCAL_MAX_CHARS
     assert decide_route(at_limit) == ROUTE_LOCAL
-    assert decide_route(at_limit + "あ") == ROUTE_HERMES
+    assert decide_route(at_limit + "a") == ROUTE_HERMES
 
 
 @pytest.mark.parametrize("text", ["", "   ", "\n\t"])
@@ -100,9 +101,9 @@ def test_decide_route_empty_goes_hermes(text):
 
 def test_decide_route_nfkc_normalisation():
     """Full-width / half-width variants of a marker still match."""
-    # ＮＦＫＣ folds full-width Latin; the half-width katakana form of
-    # ニュース must also hit the ニュース marker after normalisation.
-    assert decide_route("ﾆｭｰｽは？") == ROUTE_HERMES
+    # NFKC folds full-width Latin so "\uff57\uff45\uff41\uff54\uff48\uff45\uff52"
+    # ("weather") must hit the weather marker after normalisation.
+    assert decide_route("\uff57\uff45\uff41\uff54\uff48\uff45\uff52?") == ROUTE_HERMES
 
 
 # --- _is_date_query (date-context injection gate) ----------------------------
@@ -111,15 +112,15 @@ def test_decide_route_nfkc_normalisation():
 @pytest.mark.parametrize(
     "text",
     [
-        "今日は何曜日？",
-        "今日何日だっけ",
-        "なんにち？",
-        "日付教えて",
-        "日にちわかる？",
-        "何曜日？",
-        "曜日は？",
-        "きょうって何の日",
-        "本日のスケジュール",  # 本日 still counts as a date reference
+        "what day is today?",
+        "what's today's date?",
+        "what date is it?",
+        "tell me the date",
+        "do you know the date?",
+        "what day of the week is it?",
+        "what weekday is it?",
+        "today is what day",
+        "tell me today's schedule",  # today still counts as a date reference
         "What's the date today?",
         "what day is it today",
     ],
@@ -131,12 +132,12 @@ def test_is_date_query_true(text):
 @pytest.mark.parametrize(
     "text",
     [
-        "おはよう",
-        "うっ",
-        "電気つけて",
-        "ありがとう",
-        "こんにちは、元気？",
-        "おやすみなさい",
+        "good morning",
+        "uh",
+        "turn on the lights",
+        "thank you",
+        "hello, how are you?",
+        "go to sleep",
         "",
         "   ",
     ],
@@ -147,7 +148,7 @@ def test_is_date_query_false(text):
 
 def test_is_date_query_nfkc_folds_fullwidth():
     """Full-width 'today' folds to the ASCII marker after NFKC."""
-    assert _is_date_query("ｔｏｄａｙ？") is True
+    assert _is_date_query("\uff54\uff4f\uff44\uff41\uff59?") is True
 
 
 # --- is_enabled (opt-in gate) -------------------------------------------------
@@ -199,7 +200,7 @@ async def test_ask_local_survives_invalid_timeout_env(
     async def handle(request: web.Request) -> web.Response:
         await request.read()
         return web.json_response(
-            {"message": {"role": "assistant", "content": "やあ"}}
+            {"message": {"role": "assistant", "content": "hey"}}
         )
 
     runner, base_url = await _run_ollama_stub(handle, aiohttp_unused_port)
@@ -207,10 +208,10 @@ async def test_ask_local_survives_invalid_timeout_env(
     monkeypatch.setenv("STACKCHAN_LOCAL_LLM_URL", base_url)
     monkeypatch.setenv("STACKCHAN_LOCAL_LLM_TIMEOUT_S", "abc")
     try:
-        reply = await ask_local("おはよう", system_prompt="短く。")
+        reply = await ask_local("good morning", system_prompt="be brief.")
     finally:
         await runner.cleanup()
-    assert reply == "やあ"
+    assert reply == "hey"
 
 
 # --- ask_local (Ollama /api/chat) ---------------------------------------------
@@ -239,30 +240,30 @@ async def test_ask_local_success(monkeypatch, aiohttp_unused_port):
     async def handle(request: web.Request) -> web.Response:
         received["payload"] = await request.json()
         return web.json_response(
-            {"message": {"role": "assistant", "content": " こんにちは！ "}}
+            {"message": {"role": "assistant", "content": " hello! "}}
         )
 
     runner, base_url = await _run_ollama_stub(handle, aiohttp_unused_port)
     monkeypatch.setenv("STACKCHAN_LOCAL_LLM_MODEL", "test-model:q4")
     monkeypatch.setenv("STACKCHAN_LOCAL_LLM_URL", base_url)
     try:
-        reply = await ask_local("こんにちは", system_prompt="短く話して。")
+        reply = await ask_local("hello", system_prompt="speak briefly.")
     finally:
         await runner.cleanup()
 
-    assert reply == "こんにちは！"
+    assert reply == "hello!"
     payload = received["payload"]
     assert payload["model"] == "test-model:q4"
     assert payload["stream"] is False
     assert payload["keep_alive"] == local_llm.DEFAULT_LOCAL_LLM_KEEP_ALIVE
     system = payload["messages"][0]
     assert system["role"] == "system"
-    assert system["content"].startswith("短く話して。")
+    assert system["content"].startswith("speak briefly.")
     # non-date turn: date context must be absent so the model can't blurt it
-    assert "曜日)" not in system["content"]
+    assert "weekday)" not in system["content"]
     # no-tools guard: the local model must not pretend to run tools
     assert local_llm.LOCAL_NO_TOOLS_LINE in system["content"]
-    assert payload["messages"][1] == {"role": "user", "content": "こんにちは"}
+    assert payload["messages"][1] == {"role": "user", "content": "hello"}
 
 
 @pytest.mark.asyncio
@@ -275,45 +276,45 @@ async def test_ask_local_injects_date_only_on_date_query(
     async def handle(request: web.Request) -> web.Response:
         received["payload"] = await request.json()
         return web.json_response(
-            {"message": {"role": "assistant", "content": "今日は木曜日だよ！"}}
+            {"message": {"role": "assistant", "content": "today is Thursday!"}}
         )
 
     runner, base_url = await _run_ollama_stub(handle, aiohttp_unused_port)
     monkeypatch.setenv("STACKCHAN_LOCAL_LLM_MODEL", "test-model:q4")
     monkeypatch.setenv("STACKCHAN_LOCAL_LLM_URL", base_url)
     try:
-        await ask_local("今日は何曜日？", system_prompt="短く話して。")
+        await ask_local("what day is today?", system_prompt="speak briefly.")
     finally:
         await runner.cleanup()
 
     system = received["payload"]["messages"][0]["content"]
-    assert "曜日)です。" in system   # assertive date context injected
+    assert "Today's date is" in system   # assertive date context injected
     assert local_llm.LOCAL_NO_TOOLS_LINE in system
 
 
 @pytest.mark.asyncio
 async def test_ask_local_no_date_on_vague_turn(monkeypatch, aiohttp_unused_port):
-    """Regression: a vague non-date turn (「うっ」) must not carry the date,
+    """Regression: a vague non-date turn ("uh") must not carry the date,
     so the local model cannot volunteer it unprompted."""
     received: dict[str, Any] = {}
 
     async def handle(request: web.Request) -> web.Response:
         received["payload"] = await request.json()
         return web.json_response(
-            {"message": {"role": "assistant", "content": "どうしたの？"}}
+            {"message": {"role": "assistant", "content": "what's up?"}}
         )
 
     runner, base_url = await _run_ollama_stub(handle, aiohttp_unused_port)
     monkeypatch.setenv("STACKCHAN_LOCAL_LLM_MODEL", "test-model:q4")
     monkeypatch.setenv("STACKCHAN_LOCAL_LLM_URL", base_url)
     try:
-        await ask_local("うっ", system_prompt="短く話して。")
+        await ask_local("uh", system_prompt="speak briefly.")
     finally:
         await runner.cleanup()
 
     system = received["payload"]["messages"][0]["content"]
-    assert "今日は" not in system
-    assert "曜日" not in system
+    assert "Today's date is" not in system
+    assert "weekday" not in system
 
 
 @pytest.mark.asyncio
@@ -326,7 +327,7 @@ async def test_ask_local_strips_think_tags(monkeypatch, aiohttp_unused_port):
             {
                 "message": {
                     "role": "assistant",
-                    "content": "<think>長い思考...\n改行も</think>はい、木曜日です。",
+                    "content": " thinking some long thinking...\nwith newline response yes, Thursday.",
                 }
             }
         )
@@ -335,11 +336,11 @@ async def test_ask_local_strips_think_tags(monkeypatch, aiohttp_unused_port):
     monkeypatch.setenv("STACKCHAN_LOCAL_LLM_MODEL", "test-model:q4")
     monkeypatch.setenv("STACKCHAN_LOCAL_LLM_URL", base_url)
     try:
-        reply = await ask_local("今日は何曜日？", system_prompt="短く。")
+        reply = await ask_local("what day is today?", system_prompt="be brief.")
     finally:
         await runner.cleanup()
 
-    assert reply == "はい、木曜日です。"
+    assert reply == "yes, Thursday."
 
 
 @pytest.mark.asyncio
@@ -355,7 +356,7 @@ async def test_ask_local_error_status_raises(monkeypatch, aiohttp_unused_port):
     monkeypatch.setenv("STACKCHAN_LOCAL_LLM_URL", base_url)
     try:
         with pytest.raises(RuntimeError, match="status=404"):
-            await ask_local("おはよう", system_prompt="短く。")
+            await ask_local("good morning", system_prompt="be brief.")
     finally:
         await runner.cleanup()
 
@@ -373,7 +374,7 @@ async def test_ask_local_empty_reply_raises(monkeypatch, aiohttp_unused_port):
     monkeypatch.setenv("STACKCHAN_LOCAL_LLM_URL", base_url)
     try:
         with pytest.raises(RuntimeError, match="empty reply"):
-            await ask_local("おはよう", system_prompt="短く。")
+            await ask_local("good morning", system_prompt="be brief.")
     finally:
         await runner.cleanup()
 
@@ -382,7 +383,7 @@ async def test_ask_local_empty_reply_raises(monkeypatch, aiohttp_unused_port):
 async def test_ask_local_without_model_raises(monkeypatch):
     monkeypatch.delenv("STACKCHAN_LOCAL_LLM_MODEL", raising=False)
     with pytest.raises(RuntimeError, match="STACKCHAN_LOCAL_LLM_MODEL"):
-        await ask_local("おはよう", system_prompt="短く。")
+        await ask_local("good morning", system_prompt="be brief.")
 
 
 # --- generate_reply (routing + fallback in the voice bridge) ------------------
@@ -397,7 +398,7 @@ async def test_generate_reply_disabled_uses_hermes(monkeypatch):
 
     async def fake_hermes(text: str, *, session_id: str | None = None) -> str:
         calls.append(text)
-        return "hermesの返事"
+        return "hermes reply"
 
     async def fail_local(text: str, *, system_prompt: str) -> str:
         raise AssertionError("local path must not be called when disabled")
@@ -405,9 +406,9 @@ async def test_generate_reply_disabled_uses_hermes(monkeypatch):
     monkeypatch.setattr(hermes_bridge, "ask_hermes", fake_hermes)
     monkeypatch.setattr(local_llm, "ask_local", fail_local)
 
-    reply, route = await hermes_bridge.generate_reply("おはよう")
-    assert (reply, route) == ("hermesの返事", "hermes")
-    assert calls == ["おはよう"]
+    reply, route = await hermes_bridge.generate_reply("good morning")
+    assert (reply, route) == ("hermes reply", "hermes")
+    assert calls == ["good morning"]
 
 
 @pytest.mark.asyncio
@@ -418,15 +419,15 @@ async def test_generate_reply_routes_short_turn_local(monkeypatch):
         raise AssertionError("Hermes must not be called on the local route")
 
     async def fake_local(text: str, *, system_prompt: str) -> str:
-        assert text == "おはよう"
+        assert text == "good morning"
         assert system_prompt   # voice constraints are passed through
-        return "localの返事"
+        return "local reply"
 
     monkeypatch.setattr(hermes_bridge, "ask_hermes", fail_hermes)
     monkeypatch.setattr(local_llm, "ask_local", fake_local)
 
-    reply, route = await hermes_bridge.generate_reply("おはよう")
-    assert (reply, route) == ("localの返事", "local")
+    reply, route = await hermes_bridge.generate_reply("good morning")
+    assert (reply, route) == ("local reply", "local")
 
 
 @pytest.mark.asyncio
@@ -435,7 +436,7 @@ async def test_generate_reply_long_turn_goes_hermes(monkeypatch):
     monkeypatch.setenv("STACKCHAN_LOCAL_LLM_MODEL", "test-model:q4")
 
     async def fake_hermes(text: str, *, session_id: str | None = None) -> str:
-        return "hermesの返事"
+        return "hermes reply"
 
     async def fail_local(text: str, *, system_prompt: str) -> str:
         raise AssertionError("local path must not be called for Hermes turns")
@@ -443,8 +444,8 @@ async def test_generate_reply_long_turn_goes_hermes(monkeypatch):
     monkeypatch.setattr(hermes_bridge, "ask_hermes", fake_hermes)
     monkeypatch.setattr(local_llm, "ask_local", fail_local)
 
-    reply, route = await hermes_bridge.generate_reply("明日の天気を調べて")
-    assert (reply, route) == ("hermesの返事", "hermes")
+    reply, route = await hermes_bridge.generate_reply("check the weather tomorrow")
+    assert (reply, route) == ("hermes reply", "hermes")
 
 
 @pytest.mark.asyncio
@@ -453,7 +454,7 @@ async def test_generate_reply_local_failure_falls_back(monkeypatch):
     monkeypatch.setenv("STACKCHAN_LOCAL_LLM_MODEL", "test-model:q4")
 
     async def fake_hermes(text: str, *, session_id: str | None = None) -> str:
-        return "hermesの返事"
+        return "hermes reply"
 
     async def broken_local(text: str, *, system_prompt: str) -> str:
         raise RuntimeError("connection refused")
@@ -461,8 +462,8 @@ async def test_generate_reply_local_failure_falls_back(monkeypatch):
     monkeypatch.setattr(hermes_bridge, "ask_hermes", fake_hermes)
     monkeypatch.setattr(local_llm, "ask_local", broken_local)
 
-    reply, route = await hermes_bridge.generate_reply("おはよう")
-    assert (reply, route) == ("hermesの返事", "hermes")
+    reply, route = await hermes_bridge.generate_reply("good morning")
+    assert (reply, route) == ("hermes reply", "hermes")
 
 
 @pytest.mark.asyncio
@@ -475,7 +476,7 @@ async def test_generate_reply_hermes_failure_still_raises(monkeypatch):
 
     monkeypatch.setattr(hermes_bridge, "ask_hermes", broken_hermes)
     with pytest.raises(RuntimeError, match="status=500"):
-        await hermes_bridge.generate_reply("おはよう")
+        await hermes_bridge.generate_reply("good morning")
 
 
 # --- helpers ------------------------------------------------------------------

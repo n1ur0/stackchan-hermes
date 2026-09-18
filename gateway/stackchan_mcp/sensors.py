@@ -1,4 +1,4 @@
-"""Port A I2C sensor reads for the yorishiro sensor tab (道A).
+"""Port A I2C sensor reads for the yorishiro sensor tab (Port A).
 
 yorishiro fork specific module (not intended for upstream PR).
 

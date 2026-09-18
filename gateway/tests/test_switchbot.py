@@ -112,14 +112,14 @@ async def test_list_devices_success(monkeypatch, aiohttp_unused_port):
         "deviceList": [
             {
                 "deviceId": "AABBCCDDEEFF",
-                "deviceName": "リビングのプラグ",
+                "deviceName": "Living Room Plug",
                 "deviceType": "Plug Mini (JP)",
             }
         ],
         "infraredRemoteList": [
             {
                 "deviceId": "02-202401010000-12345678",
-                "deviceName": "リビングの電気",
+                "deviceName": "Living Room lights",
                 "remoteType": "Light",
             }
         ],

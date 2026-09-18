@@ -4,7 +4,7 @@ import datetime as dt
 
 from stackchan_mcp import weather
 
-CITY = "2720900"  # 守口市
+CITY = "2720900"  # Moriguchi city
 TODAY = dt.date(2026, 6, 12)
 
 
@@ -22,7 +22,7 @@ def forecast_json(time_defines, pops):
             "timeSeries": [
                 {
                     "timeDefines": ["2026-06-12T05:00:00+09:00"],
-                    "areas": [{"area": {"code": "270000"}, "weathers": ["くもり"]}],
+                    "areas": [{"area": {"code": "270000"}, "weathers": ["cloudy"]}],
                 },
                 {
                     "timeDefines": time_defines,
@@ -44,22 +44,22 @@ NORMAL_FORECAST = forecast_json(
 def test_active_warnings_filters_cancelled():
     data = warning_json(
         [
-            {"code": "03", "status": "発表"},
-            {"code": "18", "status": "継続"},
-            {"code": "21", "status": "解除"},
+            {"code": "03", "status": "issued"},
+            {"code": "18", "status": "continued"},
+            {"code": "21", "status": "cancelled"},
         ]
     )
-    assert weather.active_warnings(data, CITY) == ["大雨警報", "洪水注意報"]
+    assert weather.active_warnings(data, CITY) == ["Heavy Rain Warning", "Flood Advisory"]
 
 
 def test_active_warnings_other_city_ignored():
-    data = warning_json([{"code": "03", "status": "発表"}], city="2710000")
+    data = warning_json([{"code": "03", "status": "issued"}], city="2710000")
     assert weather.active_warnings(data, CITY) == []
 
 
 def test_active_warnings_unknown_code_generic():
-    data = warning_json([{"code": "99", "status": "発表"}])
-    assert weather.active_warnings(data, CITY) == ["気象の注意報"]
+    data = warning_json([{"code": "99", "status": "issued"}])
+    assert weather.active_warnings(data, CITY) == ["weather advisory"]
 
 
 # ---- today_max_pop ---------------------------------------------------
@@ -103,33 +103,33 @@ def judge(warnings_data, forecast_data, threshold=50):
 
 
 def test_judge_warning_takes_priority():
-    data = warning_json([{"code": "03", "status": "発表"}])
+    data = warning_json([{"code": "03", "status": "issued"}])
     rainy = forecast_json(["2026-06-12T06:00:00+09:00"], ["80"])
     line = judge(data, rainy)
-    assert line == "大雨警報が出てるよ、気をつけてね"
+    assert line == "Warnings active: Heavy Rain Warning. Stay safe!"
 
 
 def test_judge_two_warnings_listed():
     data = warning_json(
         [
-            {"code": "03", "status": "発表"},
-            {"code": "04", "status": "発表"},
-            {"code": "14", "status": "発表"},  # third one not listed
+            {"code": "03", "status": "issued"},
+            {"code": "04", "status": "issued"},
+            {"code": "14", "status": "issued"},  # third one not listed
         ]
     )
     line = judge(data, NORMAL_FORECAST)
-    assert line == "大雨警報と洪水警報が出てるよ、気をつけてね"
+    assert line == "Warnings active: Heavy Rain Warning, Flood Warning. Stay safe!"
 
 
 def test_judge_rain_at_threshold():
-    data = warning_json([{"code": "21", "status": "解除"}])
+    data = warning_json([{"code": "21", "status": "cancelled"}])
     rainy = forecast_json(["2026-06-12T12:00:00+09:00"], ["50"])
     line = judge(data, rainy)
-    assert line == "今日は雨が降りそうだよ、降水確率50%。傘を忘れずにね"
+    assert line == "Rain likely today, 50% chance. Don't forget your umbrella."
 
 
 def test_judge_normal_day_is_silent():
-    data = warning_json([{"code": "21", "status": "解除"}])
+    data = warning_json([{"code": "21", "status": "cancelled"}])
     assert judge(data, NORMAL_FORECAST) is None
 
 

@@ -453,11 +453,11 @@ def make_memo_runner(tmp_path, monkeypatch, now=dt.time(19, 0), **speak_kw):
 
 @pytest.mark.asyncio
 async def test_memo_reminds_today_note(notes_dir, tmp_path, monkeypatch):
-    (notes_dir / "メモ.md").write_text("牛乳を買う\n詳細...", "utf-8")
+    (notes_dir / "memo.md").write_text("buy milk\nmore details...", "utf-8")
     runner = make_memo_runner(tmp_path, monkeypatch)
     line = await runner._check_memo()
     assert line is not None
-    assert "牛乳を買う" in line
+    assert "buy milk" in line
     # Same day: already reminded → silence, also across a restart.
     assert await runner._check_memo() is None
     fresh = make_memo_runner(tmp_path, monkeypatch)
@@ -467,7 +467,7 @@ async def test_memo_reminds_today_note(notes_dir, tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_memo_outside_window_is_silent(notes_dir, tmp_path, monkeypatch):
-    (notes_dir / "メモ.md").write_text("牛乳を買う", "utf-8")
+    (notes_dir / "memo.md").write_text("buy milk", "utf-8")
     runner = make_memo_runner(tmp_path, monkeypatch, now=dt.time(12, 0))
     assert await runner._check_memo() is None
 
@@ -478,7 +478,7 @@ async def test_memo_ignores_old_notes(notes_dir, tmp_path, monkeypatch):
     import time as _time
 
     path = notes_dir / "old.md"
-    path.write_text("昔のメモ", "utf-8")
+    path.write_text("an old memo", "utf-8")
     yesterday = _time.time() - 86400
     _os.utime(path, (yesterday, yesterday))
     runner = make_memo_runner(tmp_path, monkeypatch)
@@ -487,17 +487,17 @@ async def test_memo_ignores_old_notes(notes_dir, tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_memo_snippet_clamped(notes_dir, tmp_path, monkeypatch):
-    (notes_dir / "long.md").write_text("あ" * 200, "utf-8")
+    (notes_dir / "long.md").write_text("a" * 200, "utf-8")
     runner = make_memo_runner(tmp_path, monkeypatch)
     line = await runner._check_memo()
     assert line is not None
-    assert "あ" * hb.MEMO_SNIPPET_CHARS in line
-    assert "あ" * (hb.MEMO_SNIPPET_CHARS + 1) not in line
+    assert "a" * hb.MEMO_SNIPPET_CHARS in line
+    assert "a" * (hb.MEMO_SNIPPET_CHARS + 1) not in line
 
 
 def test_memo_snippet_skips_markup_and_blank():
-    assert hb._memo_snippet("\n\n# 見出し\n本文") == "見出し"
-    assert hb._memo_snippet("- 牛乳を買う") == "牛乳を買う"
+    assert hb._memo_snippet("\n\n# Heading\nbody") == "Heading"
+    assert hb._memo_snippet("- buy milk") == "buy milk"
     assert hb._memo_snippet("   \n\n") == ""
 
 
@@ -519,11 +519,11 @@ async def test_weather_speaks_once_per_day(tmp_path, monkeypatch):
 
     async def fake_check(area, city, threshold, *, today=None):
         calls.append((area, city, threshold))
-        return "今日は雨が降りそうだよ"
+        return "rain likely today"
 
     monkeypatch.setattr(hb.weather, "check_weather", fake_check)
     line = await runner._check_weather()
-    assert line == "今日は雨が降りそうだよ"
+    assert line == "rain likely today"
     assert calls == [("270000", "2720900", 50)]
     # Daily flag set: no second fetch, no second line.
     assert await runner._check_weather() is None
@@ -588,8 +588,8 @@ async def test_perform_speak_counts_and_returns_to_idle(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "stackchan_mcp.tts.orchestrator.synthesize_and_send", fake_synth
     )
-    await runner._perform_speak("テスト発話")
-    assert spoken == ["テスト発話"]
+    await runner._perform_speak("test utterance")
+    assert spoken == ["test utterance"]
     faces = [a["face"] for n, a in gw.esp32.calls if n == "self.display.set_avatar"]
     assert faces == ["happy", "idle"]
     assert runner._spoken_today() == 1

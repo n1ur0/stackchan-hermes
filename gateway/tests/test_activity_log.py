@@ -47,7 +47,7 @@ def test_append_writes_line_with_required_and_optional_fields(tmp_path):
         "heartbeat",
         "speak",
         subtype="weather",
-        text="傘いるよ",
+        text="need an umbrella",
         duration_ms=2450,
         path=path,
         ts_unix=1000.0,
@@ -59,7 +59,7 @@ def test_append_writes_line_with_required_and_optional_fields(tmp_path):
         "kind": "speak",
         "status": "ok",
         "subtype": "weather",
-        "text": "傘いるよ",
+        "text": "need an umbrella",
         "duration_ms": 2450,
     }
 

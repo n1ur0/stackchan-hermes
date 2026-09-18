@@ -246,7 +246,7 @@ def test_recommendation_formula_resolved_basis() -> None:
     assert rc["false_absent_risk_at_recommended"] == 0
     assert rc["censored_active_dropouts"] == 0
     assert rc["auto_apply"] is False
-    assert "過剰" in rc["rationale"]  # 1080 vs 60 is over-provisioned
+    assert "overly conservative" in rc["rationale"]  # 1080 vs 60 is over-provisioned
 
 
 def test_recommendation_excludes_censored_from_basis() -> None:
@@ -259,7 +259,7 @@ def test_recommendation_excludes_censored_from_basis() -> None:
     # basis = resolved [50,60] -> p99=60 -> ceil30(75)=90, NOT ~current*1.25.
     assert rc["recommended_absent_after_s"] == 90
     assert rc["censored_active_dropouts"] == 10
-    assert "短すぎ" in rc["rationale"]  # many censored -> threshold too short
+    assert "cuts off many valleys" in rc["rationale"]  # many censored -> threshold too short
 
 
 def test_recommendation_all_censored_falls_back() -> None:
@@ -319,7 +319,7 @@ def test_missing_optional_fields_no_crash() -> None:
 
 def test_render_markdown_empty() -> None:
     md = pr.render_markdown(pr.build_report([], now=0.0))
-    assert "データがありません" in md
+    assert "No data" in md
 
 
 def test_render_markdown_smoke() -> None:
@@ -329,6 +329,6 @@ def test_render_markdown_smoke() -> None:
         rec(20.0, present=True, presence=1000),
     ]
     md = pr.render_markdown(pr.build_report(rows, now=30.0, current_absent_after_s=600))
-    assert "在室診断レポート" in md
-    assert "推奨 absent_after_s" in md
+    assert "Occupancy Diagnostic Report" in md
+    assert "Recommended absent_after_s" in md
     assert isinstance(md, str)

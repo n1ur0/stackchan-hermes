@@ -550,7 +550,7 @@ class HeartbeatRunner:
                 snippets.append(snippet)
         if not snippets:
             return None
-        listed = "』と『".join(snippets)
+        listed = "; ".join(snippets)
         # Prune entries for deleted notes so the state file cannot
         # grow without bound, then remember what we are about to say.
         current_names = {e.get("name") for e in listing.get("notes", [])}
@@ -559,7 +559,7 @@ class HeartbeatRunner:
         self._state["reminded"] = reminded
         self._state["memo_done"] = today.isoformat()
         self._save_state()
-        return f"今日のメモに『{listed}』ってあるよ"
+        return f"Today's notes include: {listed}."
 
     async def _perform_speak(self, text: str) -> None:
         # Lazy import keeps capture-only deployments free of the tts

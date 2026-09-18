@@ -913,7 +913,7 @@ async def test_no_callback_when_state_unchanged() -> None:
 @pytest.mark.asyncio
 async def test_update_config_does_not_notify() -> None:
     # A dashboard threshold re-tune flips the state but must stay silent —
-    # it is not a real occupancy event (would mis-fire おかえり/おはよう).
+    # it is not a real occupancy event (would mis-fire welcome back/good morning).
     seen: list[tuple] = []
     clock = [0.0]
     monitor = make_monitor(absent_after_s=120)
