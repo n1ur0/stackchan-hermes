@@ -27,6 +27,7 @@ from stackchan_mcp.tts.audio_utils import (
     DEVICE_FRAME_DURATION_MS,
     DEVICE_SAMPLE_RATE,
 )
+from tts_fakes import FakeTTSESP32 as _FakeESP32, FakeTTSGateway as _FakeGateway
 
 
 # ---------------------------------------------------------------------------
@@ -34,26 +35,6 @@ from stackchan_mcp.tts.audio_utils import (
 # ---------------------------------------------------------------------------
 
 
-class _FakeESP32:
-    def __init__(self, *, connected: bool = True) -> None:
-        self.device_connected = connected
-        self.frames: list[bytes] = []
-        self.tts_states: list[str] = []
-        self.events: list[tuple[str, object]] = []
-        self.tts_lock = asyncio.Lock()
-
-    async def send_audio_frame(self, frame: bytes) -> None:
-        self.frames.append(frame)
-        self.events.append(("frame", frame))
-
-    async def send_tts_state(self, state: str) -> None:
-        self.tts_states.append(state)
-        self.events.append(("tts_state", state))
-
-
-class _FakeGateway:
-    def __init__(self, esp32: _FakeESP32) -> None:
-        self.esp32 = esp32
 
 
 class _FakeOpusEncoder:

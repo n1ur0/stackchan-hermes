@@ -7,9 +7,8 @@ pre-synthesised PCM to the device without going through a registered
 its engine, so these tests double as a regression guard for the back half of
 the standard ``say()`` pipeline.
 
-Fakes mirror those in :mod:`tests.test_orchestrator`; they are duplicated
-here so the new test module reads stand-alone without leaning on private
-helpers from the orchestrator tests.
+Fakes come from :mod:`tests.tts_fakes`, shared with the orchestrator and
+stream tests.
 """
 
 from __future__ import annotations
@@ -24,30 +23,9 @@ from stackchan_mcp.tts.audio_utils import (
     DEVICE_FRAME_DURATION_MS,
     DEVICE_SAMPLE_RATE,
 )
+from tts_fakes import FakeTTSESP32 as _FakeESP32, FakeTTSGateway as _FakeGateway
 
 
-class _FakeESP32:
-    """Records what reaches the wire so tests can assert event ordering."""
-
-    def __init__(self, *, connected: bool = True) -> None:
-        self.device_connected = connected
-        self.frames: list[bytes] = []
-        self.tts_states: list[str] = []
-        self.events: list[tuple[str, object]] = []
-        self.tts_lock = asyncio.Lock()
-
-    async def send_audio_frame(self, frame: bytes) -> None:
-        self.frames.append(frame)
-        self.events.append(("frame", frame))
-
-    async def send_tts_state(self, state: str) -> None:
-        self.tts_states.append(state)
-        self.events.append(("tts_state", state))
-
-
-class _FakeGateway:
-    def __init__(self, esp32: _FakeESP32) -> None:
-        self.esp32 = esp32
 
 
 @pytest.fixture
