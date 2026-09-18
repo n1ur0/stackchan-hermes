@@ -48,7 +48,14 @@ def _register_voicevox() -> None:
     get_registry().register(VoicevoxEngine())
 
 
+def _register_nerv0x() -> None:
+    from .nerv0x_tts import Nerv0xTTSEngine
+
+    get_registry().register(Nerv0xTTSEngine())
+
+
 _try_register(_register_voicevox, "voicevox")
+_try_register(_register_nerv0x, "nerv0x")
 
 
 __all__ = [

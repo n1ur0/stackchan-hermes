@@ -34,6 +34,9 @@ dependencies = [
     "pydantic>=2",
     "python-dotenv",
     "PyYAML>=6",
+    # PyAV decodes the device's Ogg/Opus captures (hermes_bridge) and
+    # the nerv0x TTS service's MP3/WAV output (tts/nerv0x_tts.py).
+    "av>=13",
     # The stdio server captures the active ServerSession via a subclassed
     # Server.run() loop because the public MCP SDK does not yet expose a
     # stable hook for server-side notifications. That subclass relies on

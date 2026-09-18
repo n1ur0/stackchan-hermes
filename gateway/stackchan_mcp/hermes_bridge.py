@@ -428,7 +428,11 @@ async def _run_voice_turn(
     # Phase 2 LED: show the "listening" colour through STT (self-
     # contained; on_listen_started already set it for device listens).
     await control.apply_led_state(gateway, "listening")
-    stt_result: dict[str, Any] = await engine.transcribe(pcm, language="ja")
+    # yorishiro fork: the default recognition language is env-driven so
+    # a PT/EN deployment does not need a code change (upstream default
+    # stays "ja").
+    stt_language = os.getenv("STACKCHAN_STT_LANGUAGE", "ja")
+    stt_result: dict[str, Any] = await engine.transcribe(pcm, language=stt_language)
     transcript = stt_result.get("text", "").strip()
     t_stt = time.monotonic()
 

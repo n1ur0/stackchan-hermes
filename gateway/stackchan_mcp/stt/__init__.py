@@ -49,8 +49,15 @@ def _register_openai_whisper() -> None:
     get_registry().register(OpenAIWhisperEngine())
 
 
+def _register_nerv0x_whisper() -> None:
+    from .nerv0x_whisper import Nerv0xWhisperEngine
+
+    get_registry().register(Nerv0xWhisperEngine())
+
+
 _try_register(_register_faster_whisper, "faster-whisper")
 _try_register(_register_openai_whisper, "openai-whisper")
+_try_register(_register_nerv0x_whisper, "nerv0x-whisper")
 
 
 __all__ = [

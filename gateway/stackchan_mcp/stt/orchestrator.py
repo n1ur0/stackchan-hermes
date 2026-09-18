@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -49,8 +50,10 @@ logger = logging.getLogger(__name__)
 
 #: Default engine name when ``engine`` is omitted from the tool call.
 #: faster-whisper runs locally and matches the "works offline out of
-#: the box" stance (Issue #91).
-DEFAULT_ENGINE = "faster-whisper"
+#: the box" stance (Issue #91). ``STACKCHAN_STT_ENGINE`` overrides it
+#: (e.g. ``nerv0x-whisper`` on deployments that transcribe on a remote
+#: GPU box instead of locally).
+DEFAULT_ENGINE = os.getenv("STACKCHAN_STT_ENGINE", "faster-whisper")
 
 #: Minimum capture window. Below this Whisper has too little signal to
 #: produce anything useful, and the listen() round-trip starts to be

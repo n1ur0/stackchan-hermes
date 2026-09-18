@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
@@ -47,8 +48,9 @@ logger = logging.getLogger(__name__)
 
 #: Default engine name when ``voice`` is omitted from the tool call.
 #: VOICEVOX is the canonical default (Issue #70); the concrete engine
-#: ships in PR2 of that Issue.
-DEFAULT_VOICE = "voicevox"
+#: ships in PR2 of that Issue. ``STACKCHAN_TTS_ENGINE`` overrides it
+#: (e.g. ``nerv0x`` on deployments that synthesise on a remote GPU box).
+DEFAULT_VOICE = os.getenv("STACKCHAN_TTS_ENGINE", "voicevox")
 
 
 async def synthesize_and_send(
