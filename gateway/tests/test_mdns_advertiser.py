@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, Callable
 
 import pytest
 
 from stackchan_mcp import mdns_advertiser as mdns
 from stackchan_mcp.mdns_advertiser import MdnsAdvertiser, build_advertisement
+
+# Canonical address lists used across the refresh-loop scenarios.
+OLD_ADDR = ["198.51.100.10"]
+NEW_ADDR = ["203.0.113.20"]
 
 
 def test_service_type_and_txt_defaults() -> None:
@@ -29,191 +35,111 @@ def test_service_hostname_is_service_specific() -> None:
     assert mdns._build_service_hostname() == "stackchan-mcp.local."
 
 
-def test_wildcard_host_advertises_all_usable_non_loopback_ipv4(
+@pytest.mark.parametrize(
+    ("ifaddr", "socket_addresses", "expected", "required", "forbidden"),
+    [
+        # 10.0.0.5 is RFC1918 (tier 1) and sorts ahead of the public 192.0.2.10.
+        (
+            [("127.0.0.1", 8), ("192.0.2.10", 24), ("0.0.0.0", 24)],
+            [("192.0.2.10", None), ("10.0.0.5", None)],
+            ["10.0.0.5", "192.0.2.10"],
+            [],
+            [],
+        ),
+        # All kept; the three private addresses move ahead of the public one,
+        # and within each tier the original enumeration order is preserved.
+        (
+            [("203.0.113.7", 24), ("192.168.0.10", 24), ("10.1.2.3", 8), ("172.16.5.6", 12)],
+            [],
+            ["192.168.0.10", "10.1.2.3", "172.16.5.6", "203.0.113.7"],
+            [],
+            [],
+        ),
+        # Real-device CGNAT scenario: 100.64.10.20/32 must remain advertised
+        # but be tried only after the reachable LAN address.
+        (
+            [("100.64.10.20", 32), ("192.168.0.10", 24)],
+            [],
+            ["192.168.0.10", "100.64.10.20"],
+            [],
+            [],
+        ),
+        (
+            [("192.168.0.0", 24), ("192.168.0.255", 24), ("192.168.0.10", 24)],
+            [],
+            ["192.168.0.10"],
+            [],
+            [],
+        ),
+        # /31 and /32 have no distinct network/broadcast address; a legitimate
+        # host IP on such a prefix must not be dropped.
+        (
+            [("192.168.5.0", 32), ("10.0.0.0", 31)],
+            [],
+            ["192.168.5.0", "10.0.0.0"],
+            [],
+            [],
+        ),
+        # The socket source carries no prefix; a ".0"-looking address from it
+        # cannot be classified as a network address and must be kept.
+        (
+            [],
+            [("192.168.0.0", None), ("192.168.0.10", None)],
+            ["192.168.0.0", "192.168.0.10"],
+            [],
+            [],
+        ),
+        # Regression: the socket source adopts the ifaddr prefix for network
+        # address filtering (192.168.1.0 is excluded as a network address).
+        (
+            [("192.168.1.42", 24), ("192.168.1.0", 24)],
+            [("192.168.1.0", None), ("192.168.1.42", None)],
+            None,
+            ["192.168.1.42"],
+            ["192.168.1.0"],
+        ),
+        # ifaddr is enumerated before socket; the stable sort keeps that
+        # combined order within each tier.
+        (
+            [("198.51.100.4", 24), ("192.168.1.2", 24)],
+            [("203.0.113.9", None), ("10.5.5.5", None)],
+            ["192.168.1.2", "10.5.5.5", "198.51.100.4", "203.0.113.9"],
+            [],
+            [],
+        ),
+    ],
+    ids=[
+        "wildcard-uses-all-usable-ipv4",
+        "rfc1918-before-others",
+        "cgnat-kept-after-rfc1918",
+        "network-and-broadcast-excluded",
+        "host-prefixes-are-not-network-or-broadcast",
+        "no-prefix-addresses-not-excluded",
+        "socket-inherits-ifaddr-prefix",
+        "mixed-tier-preserves-within-tier-order",
+    ],
+)
+def test_wildcard_host_address_selection(
     monkeypatch: pytest.MonkeyPatch,
+    ifaddr: list[tuple[str, int]],
+    socket_addresses: list[tuple[str, int | None]],
+    expected: list[str] | None,
+    required: list[str],
+    forbidden: list[str],
 ) -> None:
-    monkeypatch.setattr(
-        mdns,
-        "_iter_ifaddr_ipv4_addresses",
-        lambda: [("127.0.0.1", 8), ("192.0.2.10", 24), ("0.0.0.0", 24)],
-    )
-    monkeypatch.setattr(
-        mdns,
-        "_iter_socket_ipv4_addresses",
-        lambda: [("192.0.2.10", None), ("10.0.0.5", None)],
-    )
+    monkeypatch.setattr(mdns, "_iter_ifaddr_ipv4_addresses", lambda: ifaddr)
+    monkeypatch.setattr(mdns, "_iter_socket_ipv4_addresses", lambda: socket_addresses)
 
     advertisement = build_advertisement(host="0.0.0.0", port=8765)
 
     assert advertisement is not None
-    # 10.0.0.5 is RFC1918 (tier 1) and sorts ahead of the public 192.0.2.10.
-    assert advertisement.parsed_addresses == ["10.0.0.5", "192.0.2.10"]
-
-
-def test_rfc1918_addresses_are_advertised_before_others(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        mdns,
-        "_iter_ifaddr_ipv4_addresses",
-        lambda: [
-            ("203.0.113.7", 24),  # public, tier 2
-            ("192.168.0.10", 24),  # RFC1918, tier 1
-            ("10.1.2.3", 8),  # RFC1918, tier 1
-            ("172.16.5.6", 12),  # RFC1918, tier 1
-        ],
-    )
-    monkeypatch.setattr(mdns, "_iter_socket_ipv4_addresses", lambda: [])
-
-    advertisement = build_advertisement(host="0.0.0.0", port=8765)
-
-    assert advertisement is not None
-    # All kept; the three private addresses move ahead of the public one, and
-    # within each tier the original enumeration order is preserved.
-    assert advertisement.parsed_addresses == [
-        "192.168.0.10",
-        "10.1.2.3",
-        "172.16.5.6",
-        "203.0.113.7",
-    ]
-
-
-def test_cgnat_address_is_kept_but_ordered_after_rfc1918(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Reproduces the real-device scenario from the issue: a CGNAT address
-    # (100.64.0.0/10, here as a /32 host address) must remain advertised but be
-    # tried only after the reachable LAN address.
-    monkeypatch.setattr(
-        mdns,
-        "_iter_ifaddr_ipv4_addresses",
-        lambda: [
-            ("100.64.10.20", 32),  # CGNAT, tier 2 (must NOT be dropped)
-            ("192.168.0.10", 24),  # RFC1918 LAN, tier 1
-        ],
-    )
-    monkeypatch.setattr(mdns, "_iter_socket_ipv4_addresses", lambda: [])
-
-    advertisement = build_advertisement(host="0.0.0.0", port=8765)
-
-    assert advertisement is not None
-    assert advertisement.parsed_addresses == ["192.168.0.10", "100.64.10.20"]
-
-
-def test_network_and_broadcast_addresses_are_excluded(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        mdns,
-        "_iter_ifaddr_ipv4_addresses",
-        lambda: [
-            ("192.168.0.0", 24),  # network address -> excluded
-            ("192.168.0.255", 24),  # broadcast address -> excluded
-            ("192.168.0.10", 24),  # host address -> kept
-        ],
-    )
-    monkeypatch.setattr(mdns, "_iter_socket_ipv4_addresses", lambda: [])
-
-    advertisement = build_advertisement(host="0.0.0.0", port=8765)
-
-    assert advertisement is not None
-    assert advertisement.parsed_addresses == ["192.168.0.10"]
-
-
-def test_host_prefixes_are_not_treated_as_network_or_broadcast(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # /31 and /32 have no distinct network/broadcast address; a legitimate host
-    # IP on such a prefix must not be dropped.
-    monkeypatch.setattr(
-        mdns,
-        "_iter_ifaddr_ipv4_addresses",
-        lambda: [("192.168.5.0", 32), ("10.0.0.0", 31)],
-    )
-    monkeypatch.setattr(mdns, "_iter_socket_ipv4_addresses", lambda: [])
-
-    advertisement = build_advertisement(host="0.0.0.0", port=8765)
-
-    assert advertisement is not None
-    assert advertisement.parsed_addresses == ["192.168.5.0", "10.0.0.0"]
-
-
-def test_addresses_without_prefix_are_not_excluded(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The socket source carries no prefix; a ".0"-looking address from it cannot
-    # be classified as a network address and must be kept (zero-regression).
-    monkeypatch.setattr(mdns, "_iter_ifaddr_ipv4_addresses", lambda: [])
-    monkeypatch.setattr(
-        mdns,
-        "_iter_socket_ipv4_addresses",
-        lambda: [("192.168.0.0", None), ("192.168.0.10", None)],
-    )
-
-    advertisement = build_advertisement(host="0.0.0.0", port=8765)
-
-    assert advertisement is not None
-    assert advertisement.parsed_addresses == ["192.168.0.0", "192.168.0.10"]
-
-
-def test_socket_source_inherits_ifaddr_prefix_for_network_address_filtering(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Regression: an interface can end up holding its subnet's network address
-    # (e.g. ``192.168.1.0/24`` with both subnet and ifaddr-reported IP equal to
-    # ``192.168.1.0``) under unusual host routing or bridge configurations.
-    # The ifaddr source reports it with the correct prefix; the socket source
-    # (via ``getaddrinfo``) returns the same address with no prefix. Without
-    # bridging the two, the socket entry would slip past
-    # ``_is_network_or_broadcast_address`` and zeroconf would later crash with
-    # ``EADDRNOTAVAIL`` trying to ``sendto`` that address. The enumerator must
-    # adopt the ifaddr prefix for matching socket addresses so the existing
-    # network/broadcast filter applies uniformly.
-    monkeypatch.setattr(
-        mdns,
-        "_iter_ifaddr_ipv4_addresses",
-        lambda: [("192.168.1.42", 24), ("192.168.1.0", 24)],
-    )
-    monkeypatch.setattr(
-        mdns,
-        "_iter_socket_ipv4_addresses",
-        lambda: [("192.168.1.0", None), ("192.168.1.42", None)],
-    )
-
-    advertisement = build_advertisement(host="0.0.0.0", port=8765)
-
-    assert advertisement is not None
-    assert "192.168.1.0" not in advertisement.parsed_addresses
-    assert "192.168.1.42" in advertisement.parsed_addresses
-
-
-def test_mixed_tier_ordering_preserves_within_tier_order(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # ifaddr source (with prefixes) is enumerated before the socket source; the
-    # stable sort must keep that combined order within each tier.
-    monkeypatch.setattr(
-        mdns,
-        "_iter_ifaddr_ipv4_addresses",
-        lambda: [("198.51.100.4", 24), ("192.168.1.2", 24)],
-    )
-    monkeypatch.setattr(
-        mdns,
-        "_iter_socket_ipv4_addresses",
-        lambda: [("203.0.113.9", None), ("10.5.5.5", None)],
-    )
-
-    advertisement = build_advertisement(host="0.0.0.0", port=8765)
-
-    assert advertisement is not None
-    # tier 1 (private), original order: 192.168.1.2 then 10.5.5.5;
-    # tier 2 (other), original order: 198.51.100.4 then 203.0.113.9.
-    assert advertisement.parsed_addresses == [
-        "192.168.1.2",
-        "10.5.5.5",
-        "198.51.100.4",
-        "203.0.113.9",
-    ]
+    parsed = advertisement.parsed_addresses
+    for address in required:
+        assert address in parsed
+    for address in forbidden:
+        assert address not in parsed
+    if expected is not None:
+        assert parsed == expected
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
@@ -224,160 +150,6 @@ def test_loopback_hosts_are_not_advertised(host: str) -> None:
 @pytest.mark.parametrize("port", [0, -1, 65536])
 def test_unpublishable_ports_are_not_advertised(port: int) -> None:
     assert build_advertisement(host="192.0.2.10", port=port) is None
-
-
-@pytest.mark.asyncio
-async def test_advertiser_registers_service(monkeypatch: pytest.MonkeyPatch) -> None:
-    instances: list[FakeAsyncZeroconf] = []
-
-    class FakeServiceInfo:
-        def __init__(self, service_type: str, service_name: str, **kwargs) -> None:
-            self.type = service_type
-            self.name = service_name
-            self.kwargs = kwargs
-
-    class FakeAsyncZeroconf:
-        def __init__(self, *, interfaces=None) -> None:
-            self.interfaces = interfaces
-            self.registered = []
-            self.unregistered = []
-            self.closed = False
-            instances.append(self)
-
-        async def async_register_service(
-            self, info: FakeServiceInfo, *, allow_name_change: bool = False
-        ) -> None:
-            self.registered.append((info, allow_name_change))
-
-        async def async_unregister_service(self, info: FakeServiceInfo) -> None:
-            self.unregistered.append(info)
-
-        async def async_close(self) -> None:
-            self.closed = True
-
-    monkeypatch.setattr(mdns, "_load_zeroconf_classes", lambda: (FakeAsyncZeroconf, FakeServiceInfo))
-    monkeypatch.setattr(mdns, "_enumerate_usable_ipv4_addresses", lambda: ["192.0.2.10", "10.0.0.5"])
-
-    advertiser = MdnsAdvertiser()
-    await advertiser.start(host="0.0.0.0", port=8765, path="/")
-
-    assert len(instances) == 1
-    zeroconf = instances[0]
-    assert len(zeroconf.registered) == 1
-    info, allow_name_change = zeroconf.registered[0]
-    assert allow_name_change is True
-    assert info.type == "_stackchan-mcp._tcp.local."
-    assert info.name == "stackchan-mcp._stackchan-mcp._tcp.local."
-    assert info.kwargs["port"] == 8765
-    assert info.kwargs["properties"] == {"path": "/", "version": "1"}
-    assert info.kwargs["parsed_addresses"] == ["192.0.2.10", "10.0.0.5"]
-
-    await advertiser.stop()
-
-    assert zeroconf.unregistered == [info]
-    assert zeroconf.closed is True
-
-
-@pytest.mark.asyncio
-async def test_advertiser_warns_when_service_name_changes(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    instances: list[RenamingAsyncZeroconf] = []
-    renamed_service_name = "stackchan-mcp-2._stackchan-mcp._tcp.local."
-
-    class FakeServiceInfo:
-        def __init__(self, service_type: str, service_name: str, **kwargs) -> None:
-            self.type = service_type
-            self.name = service_name
-            self.kwargs = kwargs
-
-    class RenamingAsyncZeroconf:
-        def __init__(self, *, interfaces=None) -> None:
-            self.interfaces = interfaces
-            self.registered = []
-            self.unregistered = []
-            self.closed = False
-            instances.append(self)
-
-        async def async_register_service(
-            self, info: FakeServiceInfo, *, allow_name_change: bool = False
-        ) -> None:
-            self.registered.append((info, allow_name_change))
-            info.name = renamed_service_name
-
-        async def async_unregister_service(self, info: FakeServiceInfo) -> None:
-            self.unregistered.append(info)
-
-        async def async_close(self) -> None:
-            self.closed = True
-
-    monkeypatch.setattr(
-        mdns,
-        "_load_zeroconf_classes",
-        lambda: (RenamingAsyncZeroconf, FakeServiceInfo),
-    )
-    caplog.set_level("WARNING", logger=mdns.__name__)
-
-    advertiser = MdnsAdvertiser()
-    await advertiser.start(host="192.0.2.10", port=8765, path="/")
-
-    assert len(instances) == 1
-    zeroconf = instances[0]
-    assert len(zeroconf.registered) == 1
-    info, allow_name_change = zeroconf.registered[0]
-    assert allow_name_change is True
-    assert info.name == renamed_service_name
-    assert zeroconf.closed is False
-    assert advertiser._zeroconf is zeroconf
-    assert advertiser._service_info is info
-    assert "modified name" in caplog.text
-    assert renamed_service_name in caplog.text
-
-    await advertiser.stop()
-
-    assert zeroconf.unregistered == [info]
-    assert zeroconf.closed is True
-
-
-@pytest.mark.asyncio
-async def test_advertiser_closes_zeroconf_when_registration_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    instances: list[FailingAsyncZeroconf] = []
-
-    class FakeServiceInfo:
-        def __init__(self, service_type: str, service_name: str, **kwargs) -> None:
-            self.type = service_type
-            self.name = service_name
-            self.kwargs = kwargs
-
-    class FailingAsyncZeroconf:
-        def __init__(self, *, interfaces=None) -> None:
-            self.interfaces = interfaces
-            self.closed = False
-            instances.append(self)
-
-        async def async_register_service(
-            self, info: FakeServiceInfo, *, allow_name_change: bool = False
-        ) -> None:
-            raise RuntimeError("mock registration failure")
-
-        async def async_close(self) -> None:
-            self.closed = True
-
-    monkeypatch.setattr(
-        mdns,
-        "_load_zeroconf_classes",
-        lambda: (FailingAsyncZeroconf, FakeServiceInfo),
-    )
-
-    advertiser = MdnsAdvertiser()
-    with pytest.raises(RuntimeError, match="mock registration failure"):
-        await advertiser.start(host="192.0.2.10", port=8765, path="/")
-
-    assert len(instances) == 1
-    assert instances[0].closed is True
 
 
 class RecordingServiceInfo:
@@ -423,18 +195,31 @@ class RecordingAsyncZeroconf:
         self.close_count += 1
 
 
+class RenamingAsyncZeroconf(RecordingAsyncZeroconf):
+    """Recording fake whose register rewrites the service name."""
+
+    renamed_name = "stackchan-mcp-2._stackchan-mcp._tcp.local."
+
+    async def async_register_service(
+        self, info: RecordingServiceInfo, *, allow_name_change: bool = False
+    ) -> None:
+        info.name = self.renamed_name
+        await super().async_register_service(info, allow_name_change=allow_name_change)
+
+
 def install_recording_zeroconf(
     monkeypatch: pytest.MonkeyPatch,
     *,
     register_errors: list[Exception | None] | None = None,
+    zeroconf_cls: type[RecordingAsyncZeroconf] = RecordingAsyncZeroconf,
 ) -> list[RecordingAsyncZeroconf]:
-    RecordingAsyncZeroconf.reset(register_errors)
+    zeroconf_cls.reset(register_errors)
     monkeypatch.setattr(
         mdns,
         "_load_zeroconf_classes",
-        lambda: (RecordingAsyncZeroconf, RecordingServiceInfo),
+        lambda: (zeroconf_cls, RecordingServiceInfo),
     )
-    return RecordingAsyncZeroconf.instances
+    return zeroconf_cls.instances
 
 
 def fast_advertiser(interval: float = 0.01) -> MdnsAdvertiser:
@@ -467,132 +252,189 @@ async def wait_until(predicate, *, timeout: float = 1.0) -> None:
     assert predicate()
 
 
+@asynccontextmanager
+async def started_advertiser(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    sequence: list[list[str]] | None = None,
+    addresses: list[str] | None = None,
+    host: str = "0.0.0.0",
+    port: int = 8765,
+    path: str = "/",
+    interval: float = 0.01,
+    register_errors: list[Exception | None] | None = None,
+    zeroconf_cls: type[RecordingAsyncZeroconf] = RecordingAsyncZeroconf,
+    setup: Callable[[pytest.MonkeyPatch], None] | None = None,
+) -> AsyncIterator[tuple[MdnsAdvertiser, list[RecordingAsyncZeroconf]]]:
+    """Start a fast advertiser against the recording fakes; always stop it."""
+    instances = install_recording_zeroconf(
+        monkeypatch, register_errors=register_errors, zeroconf_cls=zeroconf_cls
+    )
+    if sequence is not None:
+        monkeypatch.setattr(
+            mdns, "_enumerate_usable_ipv4_addresses", sequence_addresses(sequence)
+        )
+    elif addresses is not None:
+        monkeypatch.setattr(mdns, "_enumerate_usable_ipv4_addresses", lambda: addresses)
+    if setup is not None:
+        setup(monkeypatch)
+    advertiser = fast_advertiser(interval=interval)
+    await advertiser.start(host=host, port=port, path=path)
+    try:
+        yield advertiser, instances
+    finally:
+        await advertiser.stop()
+
+
 @pytest.mark.asyncio
-async def test_refresh_stable_address_list_does_not_reconfigure(
+async def test_advertiser_registers_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    async with started_advertiser(
+        monkeypatch, addresses=["192.0.2.10", "10.0.0.5"]
+    ) as (_, instances):
+        assert len(instances) == 1
+        zeroconf = instances[0]
+        assert len(zeroconf.registered) == 1
+        info, allow_name_change = zeroconf.registered[0]
+        assert allow_name_change is True
+        assert info.type == "_stackchan-mcp._tcp.local."
+        assert info.name == "stackchan-mcp._stackchan-mcp._tcp.local."
+        assert info.kwargs["port"] == 8765
+        assert info.kwargs["properties"] == {"path": "/", "version": "1"}
+        assert info.kwargs["parsed_addresses"] == ["192.0.2.10", "10.0.0.5"]
+
+    # stop() inside the manager unregisters and closes the zeroconf.
+    assert zeroconf.unregistered == [info]
+    assert zeroconf.closed is True
+
+
+@pytest.mark.asyncio
+async def test_advertiser_warns_when_service_name_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    renamed_service_name = RenamingAsyncZeroconf.renamed_name
+    caplog.set_level("WARNING", logger=mdns.__name__)
+
+    async with started_advertiser(
+        monkeypatch, host="192.0.2.10", zeroconf_cls=RenamingAsyncZeroconf
+    ) as (advertiser, instances):
+        assert len(instances) == 1
+        zeroconf = instances[0]
+        assert len(zeroconf.registered) == 1
+        info, allow_name_change = zeroconf.registered[0]
+        assert allow_name_change is True
+        assert info.name == renamed_service_name
+        assert zeroconf.closed is False
+        assert advertiser._zeroconf is zeroconf
+        assert advertiser._service_info is info
+        assert "modified name" in caplog.text
+        assert renamed_service_name in caplog.text
+
+    # stop() inside the manager unregisters and closes the zeroconf.
+    assert zeroconf.unregistered == [info]
+    assert zeroconf.closed is True
+
+
+@pytest.mark.asyncio
+async def test_advertiser_closes_zeroconf_when_registration_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    instances = install_recording_zeroconf(monkeypatch)
-    monkeypatch.setattr(
-        mdns,
-        "_enumerate_usable_ipv4_addresses",
-        lambda: ["198.51.100.10"],
+    instances = install_recording_zeroconf(
+        monkeypatch, register_errors=[RuntimeError("mock registration failure")]
     )
 
-    advertiser = fast_advertiser()
-    await advertiser.start(host="0.0.0.0", port=8765, path="/")
-    await asyncio.sleep(advertiser._refresh_interval * 6)
+    advertiser = MdnsAdvertiser()
+    with pytest.raises(RuntimeError, match="mock registration failure"):
+        await advertiser.start(host="192.0.2.10", port=8765, path="/")
 
     assert len(instances) == 1
-    assert instances[0].unregistered == []
-    assert len(instances[0].registered) == 1
+    assert instances[0].closed is True
 
-    await advertiser.stop()
+
+@pytest.mark.parametrize(
+    "sequence",
+    [
+        # Stable address list: no reconfigure ever triggers.
+        [OLD_ADDR, OLD_ADDR, OLD_ADDR, OLD_ADDR, OLD_ADDR, OLD_ADDR],
+        # One transient tick of another address, then back: debounce absorbs it.
+        [OLD_ADDR, NEW_ADDR, OLD_ADDR, OLD_ADDR, OLD_ADDR, OLD_ADDR],
+    ],
+    ids=["stable-address-list", "transient-single-tick-change"],
+)
+@pytest.mark.asyncio
+async def test_refresh_stable_observation_does_not_reconfigure(
+    monkeypatch: pytest.MonkeyPatch,
+    sequence: list[list[str]],
+) -> None:
+    async with started_advertiser(monkeypatch, sequence=sequence) as (
+        advertiser,
+        instances,
+    ):
+        await asyncio.sleep(advertiser._refresh_interval * 6)
+
+        assert len(instances) == 1
+        assert instances[0].unregistered == []
+        assert len(instances[0].registered) == 1
+        assert advertiser._last_advertised_addresses == tuple(OLD_ADDR)
 
 
 @pytest.mark.asyncio
 async def test_refresh_changed_address_list_reconfigures_once_after_debounce(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    old = ["198.51.100.10"]
-    new = ["203.0.113.20"]
-    instances = install_recording_zeroconf(monkeypatch)
-    monkeypatch.setattr(
-        mdns,
-        "_enumerate_usable_ipv4_addresses",
-        sequence_addresses([old, old, new, new, new]),
-    )
+    async with started_advertiser(
+        monkeypatch, sequence=[OLD_ADDR, OLD_ADDR, NEW_ADDR, NEW_ADDR, NEW_ADDR]
+    ) as (advertiser, instances):
+        await wait_until(lambda: len(instances) == 2)
 
-    advertiser = fast_advertiser()
-    await advertiser.start(host="0.0.0.0", port=8765, path="/")
-    await wait_until(lambda: len(instances) == 2)
-
-    assert instances[0].unregistered == [instances[0].registered[0][0]]
-    assert instances[0].closed is True
-    assert len(instances[1].registered) == 1
-    assert advertiser._last_advertised_addresses == tuple(new)
-
-    await advertiser.stop()
-
-
-@pytest.mark.asyncio
-async def test_refresh_transient_single_tick_change_does_not_reconfigure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    old = ["198.51.100.10"]
-    transient = ["203.0.113.20"]
-    instances = install_recording_zeroconf(monkeypatch)
-    monkeypatch.setattr(
-        mdns,
-        "_enumerate_usable_ipv4_addresses",
-        sequence_addresses([old, transient, old, old, old, old]),
-    )
-
-    advertiser = fast_advertiser()
-    await advertiser.start(host="0.0.0.0", port=8765, path="/")
-    await asyncio.sleep(advertiser._refresh_interval * 6)
-
-    assert len(instances) == 1
-    assert instances[0].unregistered == []
-    assert advertiser._last_advertised_addresses == tuple(old)
-
-    await advertiser.stop()
+        assert instances[0].unregistered == [instances[0].registered[0][0]]
+        assert instances[0].closed is True
+        assert len(instances[1].registered) == 1
+        assert advertiser._last_advertised_addresses == tuple(NEW_ADDR)
 
 
 @pytest.mark.asyncio
 async def test_refresh_survives_transient_empty_build_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    old = ["198.51.100.10"]
-    new = ["203.0.113.20"]
-    instances = install_recording_zeroconf(monkeypatch)
-    monkeypatch.setattr(
-        mdns,
-        "_enumerate_usable_ipv4_addresses",
-        sequence_addresses([old, new, new, new, new, new]),
-    )
+    async with started_advertiser(
+        monkeypatch, sequence=[OLD_ADDR, NEW_ADDR, NEW_ADDR, NEW_ADDR, NEW_ADDR, NEW_ADDR]
+    ) as (advertiser, instances):
+        original_build_advertisement = mdns.build_advertisement
+        empty_builds = [None]
 
-    advertiser = fast_advertiser()
-    await advertiser.start(host="0.0.0.0", port=8765, path="/")
+        def flaky_build_advertisement(*, host: str, port: int, path: str = "/"):
+            if empty_builds:
+                return empty_builds.pop(0)
+            return original_build_advertisement(host=host, port=port, path=path)
 
-    original_build_advertisement = mdns.build_advertisement
-    empty_builds = [None]
+        monkeypatch.setattr(mdns, "build_advertisement", flaky_build_advertisement)
+        await wait_until(lambda: len(instances) == 2)
 
-    def flaky_build_advertisement(*, host: str, port: int, path: str = "/"):
-        if empty_builds:
-            return empty_builds.pop(0)
-        return original_build_advertisement(host=host, port=port, path=path)
-
-    monkeypatch.setattr(mdns, "build_advertisement", flaky_build_advertisement)
-    await wait_until(lambda: len(instances) == 2)
-
-    assert advertiser._refresh_task is not None
-    assert not advertiser._refresh_task.done()
-    assert instances[0].unregistered == [instances[0].registered[0][0]]
-    assert advertiser._last_advertised_addresses == tuple(new)
-
-    await advertiser.stop()
+        assert advertiser._refresh_task is not None
+        assert not advertiser._refresh_task.done()
+        assert instances[0].unregistered == [instances[0].registered[0][0]]
+        assert advertiser._last_advertised_addresses == tuple(NEW_ADDR)
 
 
 @pytest.mark.asyncio
 async def test_double_start_closes_previous_registration_before_new_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    instances = install_recording_zeroconf(monkeypatch)
+    async with started_advertiser(monkeypatch, host="198.51.100.10") as (
+        advertiser,
+        instances,
+    ):
+        first_task = advertiser._refresh_task
+        await advertiser.start(host="203.0.113.20", port=8765, path="/")
 
-    advertiser = fast_advertiser()
-    await advertiser.start(host="198.51.100.10", port=8765, path="/")
-    first_task = advertiser._refresh_task
-    await advertiser.start(host="203.0.113.20", port=8765, path="/")
-
-    assert first_task is not None
-    assert first_task.done()
-    assert len(instances) == 2
-    assert instances[0].unregistered == [instances[0].registered[0][0]]
-    assert instances[0].closed is True
-    assert instances[1].closed is False
-    assert advertiser._zeroconf is instances[1]
-
-    await advertiser.stop()
+        assert first_task is not None
+        assert first_task.done()
+        assert len(instances) == 2
+        assert instances[0].unregistered == [instances[0].registered[0][0]]
+        assert instances[0].closed is True
+        assert instances[1].closed is False
+        assert advertiser._zeroconf is instances[1]
 
 
 @pytest.mark.asyncio
@@ -625,63 +467,43 @@ async def test_refresh_compares_canonical_address_order(
     # The refresh loop compares the canonical list returned by the enumerator.
     # Raw interface ordering is normalized by _select_advertised_addresses; if
     # the canonical order is unchanged, no recycle is needed.
-    instances = install_recording_zeroconf(monkeypatch)
-    monkeypatch.setattr(
-        mdns,
-        "_enumerate_usable_ipv4_addresses",
-        sequence_addresses([canonical, canonical, canonical, canonical]),
-    )
-    advertiser = fast_advertiser()
-    await advertiser.start(host="0.0.0.0", port=8765, path="/")
-    await asyncio.sleep(advertiser._refresh_interval * 3)
-    assert len(instances) == 1
-    assert instances[0].unregistered == []
-    await advertiser.stop()
+    async with started_advertiser(
+        monkeypatch, sequence=[canonical, canonical, canonical, canonical]
+    ) as (advertiser, instances):
+        await asyncio.sleep(advertiser._refresh_interval * 3)
+        assert len(instances) == 1
+        assert instances[0].unregistered == []
 
-    instances = install_recording_zeroconf(monkeypatch)
-    monkeypatch.setattr(
-        mdns,
-        "_enumerate_usable_ipv4_addresses",
-        sequence_addresses([canonical, forced_order, forced_order, forced_order]),
-    )
-    advertiser = fast_advertiser()
-    await advertiser.start(host="0.0.0.0", port=8765, path="/")
-    await wait_until(lambda: len(instances) == 2)
-    assert instances[0].unregistered == [instances[0].registered[0][0]]
-    assert advertiser._last_advertised_addresses == tuple(forced_order)
-    await advertiser.stop()
+    async with started_advertiser(
+        monkeypatch,
+        sequence=[canonical, forced_order, forced_order, forced_order],
+    ) as (advertiser, instances):
+        await wait_until(lambda: len(instances) == 2)
+        assert instances[0].unregistered == [instances[0].registered[0][0]]
+        assert advertiser._last_advertised_addresses == tuple(forced_order)
 
 
 @pytest.mark.asyncio
 async def test_refresh_register_failure_cleans_up_and_loop_continues(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    old = ["198.51.100.10"]
-    new = ["203.0.113.20"]
-    instances = install_recording_zeroconf(
+    async with started_advertiser(
         monkeypatch,
+        sequence=[OLD_ADDR, NEW_ADDR, NEW_ADDR, NEW_ADDR, NEW_ADDR, NEW_ADDR],
         register_errors=[None, RuntimeError("mock refresh registration failure"), None],
-    )
-    monkeypatch.setattr(
-        mdns,
-        "_enumerate_usable_ipv4_addresses",
-        sequence_addresses([old, new, new, new, new, new]),
-    )
+    ) as (advertiser, instances):
+        await wait_until(
+            lambda: len(instances) == 3 and advertiser._zeroconf is instances[2]
+        )
 
-    advertiser = fast_advertiser()
-    await advertiser.start(host="0.0.0.0", port=8765, path="/")
-    await wait_until(lambda: len(instances) == 3 and advertiser._zeroconf is instances[2])
-
-    assert instances[0].unregistered == [instances[0].registered[0][0]]
-    assert instances[0].closed is True
-    assert instances[1].registered == []
-    assert instances[1].closed is True
-    assert len(instances[2].registered) == 1
-    assert advertiser._refresh_task is not None
-    assert not advertiser._refresh_task.done()
-    assert advertiser._last_advertised_addresses == tuple(new)
-
-    await advertiser.stop()
+        assert instances[0].unregistered == [instances[0].registered[0][0]]
+        assert instances[0].closed is True
+        assert instances[1].registered == []
+        assert instances[1].closed is True
+        assert len(instances[2].registered) == 1
+        assert advertiser._refresh_task is not None
+        assert not advertiser._refresh_task.done()
+        assert advertiser._last_advertised_addresses == tuple(NEW_ADDR)
 
 
 def test_refresh_interval_validation() -> None:
@@ -694,18 +516,18 @@ def test_refresh_interval_validation() -> None:
 
 @pytest.mark.asyncio
 async def test_stop_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
-    instances = install_recording_zeroconf(monkeypatch)
+    async with started_advertiser(monkeypatch, host="198.51.100.10") as (
+        advertiser,
+        instances,
+    ):
+        await advertiser.stop()
+        close_count = instances[0].close_count
+        unregister_count = len(instances[0].unregistered)
 
-    advertiser = fast_advertiser()
-    await advertiser.start(host="198.51.100.10", port=8765, path="/")
-    await advertiser.stop()
-    close_count = instances[0].close_count
-    unregister_count = len(instances[0].unregistered)
+        await advertiser.stop()
 
-    await advertiser.stop()
-
-    assert instances[0].close_count == close_count
-    assert len(instances[0].unregistered) == unregister_count
+        assert instances[0].close_count == close_count
+        assert len(instances[0].unregistered) == unregister_count
 
 
 @pytest.mark.asyncio
@@ -718,34 +540,34 @@ async def test_refresh_with_concrete_host_ignores_unrelated_interface_changes(
     Otherwise a multi-NIC / Tailscale host churns the registration on every
     refresh tick even though the actually-advertised set never changes.
     """
-    instances = install_recording_zeroconf(monkeypatch)
 
-    # The concrete-host resolver stays constant across all refresh ticks.
-    monkeypatch.setattr(
-        mdns,
-        "_resolve_concrete_host_ipv4_addresses",
-        lambda host: ["192.0.2.10"] if host == "192.0.2.10" else [],
-    )
-    # The wildcard enumerator returns a DIFFERENT (extra) set that must NOT
-    # influence the refresh decision when host is concrete.
-    monkeypatch.setattr(
-        mdns,
-        "_enumerate_usable_ipv4_addresses",
-        lambda: ["192.0.2.10", "10.0.0.5"],
-    )
+    def concrete_host_setup(mp: pytest.MonkeyPatch) -> None:
+        # The concrete-host resolver stays constant across all refresh ticks.
+        mp.setattr(
+            mdns,
+            "_resolve_concrete_host_ipv4_addresses",
+            lambda host: ["192.0.2.10"] if host == "192.0.2.10" else [],
+        )
+        # The wildcard enumerator returns a DIFFERENT (extra) set that must NOT
+        # influence the refresh decision when host is concrete.
+        mp.setattr(
+            mdns,
+            "_enumerate_usable_ipv4_addresses",
+            lambda: ["192.0.2.10", "10.0.0.5"],
+        )
 
-    advertiser = fast_advertiser()
-    await advertiser.start(host="192.0.2.10", port=8765, path="/")
+    async with started_advertiser(
+        monkeypatch,
+        host="192.0.2.10",
+        setup=concrete_host_setup,
+    ) as (advertiser, instances):
+        # Let several refresh cycles run; the concrete-host comparison must
+        # stay stable so no second zeroconf instance is ever created.
+        await asyncio.sleep(advertiser._refresh_interval * 3)
 
-    # Let several refresh cycles run; the concrete-host comparison must stay
-    # stable so no second zeroconf instance is ever created.
-    await asyncio.sleep(advertiser._refresh_interval * 3)
-
-    assert len(instances) == 1
-    assert instances[0].unregistered == []
-    assert advertiser._last_advertised_addresses == ("192.0.2.10",)
-
-    await advertiser.stop()
+        assert len(instances) == 1
+        assert instances[0].unregistered == []
+        assert advertiser._last_advertised_addresses == ("192.0.2.10",)
 
 
 @pytest.mark.asyncio
@@ -760,45 +582,33 @@ async def test_reconfigure_register_failure_then_ip_revert_still_recovers(
     refresh loop sees ``current == _last_advertised`` and stays quiet —
     leaving the advertisement permanently dead until manual restart.
     """
-    old = ["198.51.100.10"]
-    new = ["203.0.113.20"]
-
-    # Sequence: initial register (old) → refresh observes new → debounce
+    # Sequence: initial register (OLD) → refresh observes NEW → debounce
     # confirm new → reconfigure: close old, register new fails → IP reverts
     # to old → refresh observes old (≠ None after the failed reconfigure)
     # → debounce confirm old → reconfigure: register succeeds.
-    instances = install_recording_zeroconf(
+    async with started_advertiser(
         monkeypatch,
+        sequence=[OLD_ADDR, NEW_ADDR, NEW_ADDR, OLD_ADDR, OLD_ADDR, OLD_ADDR, OLD_ADDR],
         register_errors=[None, RuntimeError("mock reconfigure register fail"), None],
-    )
-    monkeypatch.setattr(
-        mdns,
-        "_enumerate_usable_ipv4_addresses",
-        sequence_addresses([old, new, new, old, old, old, old]),
-    )
+    ) as (advertiser, instances):
+        # Wait until the third zeroconf instance is created — this is the
+        # recovery that only happens if the previous failure cleared
+        # _last_advertised.
+        await wait_until(
+            lambda: len(instances) == 3 and advertiser._zeroconf is instances[2]
+        )
 
-    advertiser = fast_advertiser()
-    await advertiser.start(host="0.0.0.0", port=8765, path="/")
-
-    # Wait until the third zeroconf instance is created — this is the recovery
-    # that only happens if the previous failure cleared _last_advertised.
-    await wait_until(
-        lambda: len(instances) == 3 and advertiser._zeroconf is instances[2]
-    )
-
-    # instance 0: original (old IP) was closed during the failed reconfigure.
-    assert instances[0].closed is True
-    # instance 1: register call raised, no successful registration recorded,
-    # internal cleanup closes the partially-constructed zeroconf.
-    assert instances[1].registered == []
-    assert instances[1].closed is True
-    # instance 2: recovery succeeded against the reverted (old) IP.
-    assert len(instances[2].registered) == 1
-    assert advertiser._last_advertised_addresses == tuple(old)
-    assert advertiser._refresh_task is not None
-    assert not advertiser._refresh_task.done()
-
-    await advertiser.stop()
+        # instance 0: original (old IP) was closed during the failed reconfigure.
+        assert instances[0].closed is True
+        # instance 1: register call raised, no successful registration recorded,
+        # internal cleanup closes the partially-constructed zeroconf.
+        assert instances[1].registered == []
+        assert instances[1].closed is True
+        # instance 2: recovery succeeded against the reverted (old) IP.
+        assert len(instances[2].registered) == 1
+        assert advertiser._last_advertised_addresses == tuple(OLD_ADDR)
+        assert advertiser._refresh_task is not None
+        assert not advertiser._refresh_task.done()
 
 
 @pytest.mark.asyncio
@@ -814,22 +624,11 @@ async def test_reconfigure_close_failure_then_revert_to_old_ip_still_recovers(
     cache pointing at the old (now-dead) registration and silently stop
     advertising forever.
     """
-    old = ["198.51.100.10"]
-    new = ["203.0.113.20"]
-
-    # Two healthy registrations bracket the failing reconfigure attempt.
-    # instance 0 is the initial register; instance 1 is the recovery
-    # register after the IP reverts.
-    instances = install_recording_zeroconf(monkeypatch)
-    monkeypatch.setattr(
-        mdns,
-        "_enumerate_usable_ipv4_addresses",
-        sequence_addresses([old, new, new, old, old, old, old]),
-    )
-
     # Make the close path fail exactly once — on the FIRST close that
     # follows the initial register. Subsequent closes (on the recovery
-    # path and stop()) succeed normally.
+    # path and stop()) succeed normally. Two healthy registrations bracket
+    # the failing reconfigure attempt: instance 0 is the initial register,
+    # instance 1 the recovery register after the IP reverts.
     close_calls = {"n": 0}
     original_close = RecordingAsyncZeroconf.async_close
 
@@ -841,30 +640,28 @@ async def test_reconfigure_close_failure_then_revert_to_old_ip_still_recovers(
             raise RuntimeError("mock async_close failure on old-interface teardown")
         await original_close(self)
 
-    monkeypatch.setattr(
-        RecordingAsyncZeroconf, "async_close", flaky_async_close
-    )
+    async with started_advertiser(
+        monkeypatch,
+        sequence=[OLD_ADDR, NEW_ADDR, NEW_ADDR, OLD_ADDR, OLD_ADDR, OLD_ADDR, OLD_ADDR],
+        setup=lambda mp: mp.setattr(
+            RecordingAsyncZeroconf, "async_close", flaky_async_close
+        ),
+    ) as (advertiser, instances):
+        # Wait for the recovery: a second zeroconf instance is only created
+        # if the refresh loop saw _last_advertised_addresses == None after
+        # the failed close (rather than the stale old value) and re-tried.
+        await wait_until(
+            lambda: len(instances) == 2 and advertiser._zeroconf is instances[1]
+        )
 
-    advertiser = fast_advertiser()
-    await advertiser.start(host="0.0.0.0", port=8765, path="/")
-
-    # Wait for the recovery: a second zeroconf instance is only created
-    # if the refresh loop saw _last_advertised_addresses == None after
-    # the failed close (rather than the stale old value) and re-tried.
-    await wait_until(
-        lambda: len(instances) == 2 and advertiser._zeroconf is instances[1]
-    )
-
-    # instance 0: marked closed (the mock still set the flag) and the
-    # failure was raised so reconfigure aborted partway through.
-    assert instances[0].closed is True
-    # instance 1: recovery succeeded against the reverted (old) IP.
-    assert len(instances[1].registered) == 1
-    assert advertiser._last_advertised_addresses == tuple(old)
-    assert advertiser._refresh_task is not None
-    assert not advertiser._refresh_task.done()
-
-    await advertiser.stop()
+        # instance 0: marked closed (the mock still set the flag) and the
+        # failure was raised so reconfigure aborted partway through.
+        assert instances[0].closed is True
+        # instance 1: recovery succeeded against the reverted (old) IP.
+        assert len(instances[1].registered) == 1
+        assert advertiser._last_advertised_addresses == tuple(OLD_ADDR)
+        assert advertiser._refresh_task is not None
+        assert not advertiser._refresh_task.done()
 
 
 @pytest.mark.asyncio
