@@ -45,6 +45,7 @@ import io
 import json
 import logging
 import os
+import re
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -60,6 +61,29 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_HERMES_API_URL = "http://127.0.0.1:8642"
 DEFAULT_HERMES_SESSION_ID = "stackchan-voice"
+
+#: Hermes/DeepSeek drifts chatty even with the short-answer system prompt,
+#: and the device streams audio in realtime (one 60 ms Opus frame per
+#: push into a ~2.4 s decode queue), so a long reply stretches the turn
+#: wall-clock linerally AND lets rapid taps queue behind the tts_lock.
+#: A deterministic sentence/char budget keeps every spoken reply ≤ ~5 s.
+#: Env-tunable: STACKCHAN_MAX_REPLY_CHARS (default 160),
+#: STACKCHAN_MAX_REPLY_SENTENCES (default 2).
+def _clamp_reply_for_voice(reply: str) -> str:
+    reply = (reply or "").strip()
+    if not reply:
+        return reply
+    max_chars = int(os.getenv("STACKCHAN_MAX_REPLY_CHARS", "160"))
+    max_sentences = int(os.getenv("STACKCHAN_MAX_REPLY_SENTENCES", "2"))
+    if len(reply) <= max_chars:
+        return reply
+    kept: list[str] = []
+    for sentence in re.split(r"(?<=[.!?…])\s+", reply):
+        if len(kept) >= max_sentences or sum(map(len, kept)) + len(sentence) > max_chars:
+            break
+        kept.append(sentence)
+    clamped = " ".join(kept).strip()
+    return clamped or reply[: max_chars].rstrip()
 
 #: Spoken replies must stay short — they are synthesised and played on
 #: a 1 W speaker, and long monologues kill the conversation rhythm.
@@ -475,6 +499,8 @@ async def _run_voice_turn(
     t_llm = time.monotonic()
 
     logger.info("voice_turn: reply=%r session=%s", reply[:120], session_id)
+    # Keep the spoken turn short: see _clamp_reply_for_voice.
+    reply = _clamp_reply_for_voice(reply)
     # Phase F: show the reply as a subtitle while it plays, and — only
     # for Hermes-routed turns — light the "H" badge + the Hermes LED
     # colour. Local-LLM turns stay badge-free and keep the listening
