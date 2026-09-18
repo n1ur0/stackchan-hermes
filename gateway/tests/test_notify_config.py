@@ -3,6 +3,8 @@
 import logging
 from pathlib import Path
 
+import pytest
+
 from stackchan_mcp.event_log import DEFAULT_LOG_PATH, PATH_ENV_VAR
 from stackchan_mcp.notify_config import (
     CONFIG_ENV_VAR,
@@ -32,6 +34,13 @@ def _write_xdg_config(xdg: Path, body: str) -> Path:
     return path
 
 
+def _load_yaml_config(monkeypatch, tmp_path, body):
+    """Isolate env and load a notify config from an XDG yaml body."""
+    _, xdg = _isolate_config_env(monkeypatch, tmp_path)
+    _write_xdg_config(xdg, body)
+    return load_notify_config()
+
+
 def test_default_no_env_no_file_returns_all_off(monkeypatch, tmp_path):
     _isolate_config_env(monkeypatch, tmp_path)
 
@@ -51,37 +60,38 @@ def test_default_no_env_no_file_returns_all_off(monkeypatch, tmp_path):
     )
 
 
-def test_yaml_legacy_event_only(monkeypatch, tmp_path):
-    _, xdg = _isolate_config_env(monkeypatch, tmp_path)
-    _write_xdg_config(xdg, "legacy_event:\n  enabled: true\n")
-
-    config = load_notify_config()
-
-    assert config.legacy_event_enabled is True
-    assert config.channels_enabled is False
-    assert config.jsonl_enabled is False
-
-
-def test_yaml_channels_only(monkeypatch, tmp_path):
-    _, xdg = _isolate_config_env(monkeypatch, tmp_path)
-    _write_xdg_config(xdg, "channels:\n  enabled: true\n")
-
-    config = load_notify_config()
-
-    assert config.legacy_event_enabled is False
-    assert config.channels_enabled is True
-    assert config.jsonl_enabled is False
+@pytest.mark.parametrize(
+    "body, legacy, channels, jsonl",
+    [
+        ("legacy_event:\n  enabled: true\n", True, False, False),
+        ("channels:\n  enabled: true\n", False, True, False),
+        (
+            "legacy_event:\n"
+            "  enabled: true\n"
+            "channels:\n"
+            "  enabled: true\n"
+            "jsonl:\n"
+            "  enabled: true\n",
+            True,
+            True,
+            True,
+        ),
+    ],
+)
+def test_yaml_enable_flags(monkeypatch, tmp_path, body, legacy, channels, jsonl):
+    config = _load_yaml_config(monkeypatch, tmp_path, body)
+    assert config.legacy_event_enabled is legacy
+    assert config.channels_enabled is channels
+    assert config.jsonl_enabled is jsonl
 
 
 def test_yaml_jsonl_only_with_custom_path(monkeypatch, tmp_path):
-    _, xdg = _isolate_config_env(monkeypatch, tmp_path)
     custom_path = tmp_path / "events.jsonl"
-    _write_xdg_config(
-        xdg,
+    config = _load_yaml_config(
+        monkeypatch,
+        tmp_path,
         f"jsonl:\n  enabled: true\n  path: {custom_path}\n",
     )
-
-    config = load_notify_config()
 
     assert config.legacy_event_enabled is False
     assert config.channels_enabled is False
@@ -89,33 +99,11 @@ def test_yaml_jsonl_only_with_custom_path(monkeypatch, tmp_path):
     assert config.jsonl_path == custom_path
 
 
-def test_yaml_all_three_on(monkeypatch, tmp_path):
-    _, xdg = _isolate_config_env(monkeypatch, tmp_path)
-    _write_xdg_config(
-        xdg,
-        "legacy_event:\n"
-        "  enabled: true\n"
-        "channels:\n"
-        "  enabled: true\n"
-        "jsonl:\n"
-        "  enabled: true\n",
-    )
-
-    config = load_notify_config()
-
-    assert config.legacy_event_enabled is True
-    assert config.channels_enabled is True
-    assert config.jsonl_enabled is True
-
-
 def test_stackchan_events_path_overrides_yaml_jsonl_path(monkeypatch, tmp_path):
     _, xdg = _isolate_config_env(monkeypatch, tmp_path)
     yaml_path = tmp_path / "from-yaml.jsonl"
     env_path = tmp_path / "from-env.jsonl"
-    _write_xdg_config(
-        xdg,
-        f"jsonl:\n  enabled: true\n  path: {yaml_path}\n",
-    )
+    _write_xdg_config(xdg, f"jsonl:\n  enabled: true\n  path: {yaml_path}\n")
     monkeypatch.setenv(PATH_ENV_VAR, str(env_path))
 
     config = load_notify_config()
@@ -135,9 +123,7 @@ def test_stackchan_notify_config_env_loads_that_path(monkeypatch, tmp_path):
 
 
 def test_stackchan_notify_config_env_missing_warns_and_returns_none(
-    monkeypatch,
-    tmp_path,
-    caplog,
+    monkeypatch, tmp_path, caplog
 ):
     _isolate_config_env(monkeypatch, tmp_path)
     missing = tmp_path / "missing.yml"
@@ -150,9 +136,21 @@ def test_stackchan_notify_config_env_missing_warns_and_returns_none(
     assert "non-existent file" in caplog.text
 
 
-def test_malformed_yaml_falls_back_to_all_off(monkeypatch, tmp_path, caplog):
+@pytest.mark.parametrize(
+    "body, log_substring",
+    [
+        ("legacy_event: [\n", "Failed to load Stack-chan notify config"),
+        (
+            "legacy_event:\n  enabled: yes please\n",
+            "legacy_event.enabled must be a boolean",
+        ),
+    ],
+)
+def test_bad_yaml_falls_back_to_all_off(
+    monkeypatch, tmp_path, caplog, body, log_substring
+):
     _, xdg = _isolate_config_env(monkeypatch, tmp_path)
-    _write_xdg_config(xdg, "legacy_event: [\n")
+    _write_xdg_config(xdg, body)
 
     with caplog.at_level(logging.WARNING):
         config = load_notify_config()
@@ -160,21 +158,19 @@ def test_malformed_yaml_falls_back_to_all_off(monkeypatch, tmp_path, caplog):
     assert config.legacy_event_enabled is False
     assert config.channels_enabled is False
     assert config.jsonl_enabled is False
-    assert "Failed to load Stack-chan notify config" in caplog.text
+    assert log_substring in caplog.text
 
 
 def test_custom_messages_override_matching_default(monkeypatch, tmp_path):
-    _, xdg = _isolate_config_env(monkeypatch, tmp_path)
-    _write_xdg_config(
-        xdg,
+    config = _load_yaml_config(
+        monkeypatch,
+        tmp_path,
         "messages:\n"
         "  touch:\n"
         "    tap:\n"
         "      action: head_knock\n"
         "      template: \"(head knock, {duration_ms}ms)\"\n",
     )
-
-    config = load_notify_config()
 
     assert config.messages[("touch", "tap")] == MessageTemplate(
         action="head_knock",
@@ -183,36 +179,18 @@ def test_custom_messages_override_matching_default(monkeypatch, tmp_path):
     assert config.messages[("touch", "stroke")].action == "head_stroke"
 
 
-def test_schema_error_falls_back_to_all_off(monkeypatch, tmp_path, caplog):
-    _, xdg = _isolate_config_env(monkeypatch, tmp_path)
-    _write_xdg_config(xdg, "legacy_event:\n  enabled: yes please\n")
-
-    with caplog.at_level(logging.WARNING):
-        config = load_notify_config()
-
-    assert config.legacy_event_enabled is False
-    assert config.channels_enabled is False
-    assert config.jsonl_enabled is False
-    assert "legacy_event.enabled must be a boolean" in caplog.text
-
-
 def test_render_template_substitutes_and_preserves_unknown_placeholders():
-    rendered = render_template(
-        "tap {duration_ms}ms {unknown}",
-        {"duration_ms": 350},
-    )
+    rendered = render_template("tap {duration_ms}ms {unknown}", {"duration_ms": 350})
 
     assert rendered == "tap 350ms {unknown}"
 
 
 def test_render_template_falls_back_on_malformed_format_strings():
-    """A schema-valid but malformed template must not crash the dispatch path.
+    """Malformed templates must not crash the dispatch path.
 
-    Python ``str.format_map`` can raise ``AttributeError`` for ``{x.attr}`` on
-    a non-attribute value and ``TypeError`` for ``{x[idx]}`` on a non-
-    subscriptable value. ``render_template`` must swallow both and return
-    the original template string so a single bad user template cannot kill
-    every channels-mode tap event.
+    ``str.format_map`` raises ``AttributeError`` for ``{x.attr}`` on a
+    non-attribute value and ``TypeError`` for ``{x[idx]}`` on a
+    non-subscriptable value; each bad template is returned as-is.
     """
     payload = {"duration_ms": 350}
 
@@ -225,7 +203,7 @@ def test_render_template_falls_back_on_malformed_format_strings():
     assert render_template(item_template, payload) == item_template
 
     # ``{unknown.foo}`` exercises the _SafeFormatDict missing key path
-    # combined with a downstream attribute access; the fallback should also
-    # return the original template here rather than raise.
+    # combined with a downstream attribute access; the fallback should
+    # also return the original template here rather than raise.
     unknown_attr_template = "tap {unknown.foo}ms"
     assert render_template(unknown_attr_template, payload) == unknown_attr_template

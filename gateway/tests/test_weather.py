@@ -2,6 +2,8 @@
 
 import datetime as dt
 
+import pytest
+
 from stackchan_mcp import weather
 
 CITY = "2720900"  # Moriguchi city
@@ -36,52 +38,57 @@ def forecast_json(time_defines, pops):
 NORMAL_FORECAST = forecast_json(
     ["2026-06-12T06:00:00+09:00", "2026-06-12T12:00:00+09:00"], ["10", "0"]
 )
+NO_WARNINGS = warning_json([{"code": "21", "status": "cancelled"}])
 
 
 # ---- active_warnings -------------------------------------------------
 
 
-def test_active_warnings_filters_cancelled():
-    data = warning_json(
-        [
-            {"code": "03", "status": "issued"},
-            {"code": "18", "status": "continued"},
-            {"code": "21", "status": "cancelled"},
-        ]
-    )
-    assert weather.active_warnings(data, CITY) == ["Heavy Rain Warning", "Flood Advisory"]
-
-
-def test_active_warnings_other_city_ignored():
-    data = warning_json([{"code": "03", "status": "issued"}], city="2710000")
-    assert weather.active_warnings(data, CITY) == []
-
-
-def test_active_warnings_unknown_code_generic():
-    data = warning_json([{"code": "99", "status": "issued"}])
-    assert weather.active_warnings(data, CITY) == ["weather advisory"]
+@pytest.mark.parametrize(
+    "warnings, city, expected",
+    [
+        # only "issued" statuses are listed
+        (
+            [
+                {"code": "03", "status": "issued"},
+                {"code": "18", "status": "continued"},
+                {"code": "21", "status": "cancelled"},
+            ],
+            CITY,
+            ["Heavy Rain Warning", "Flood Advisory"],
+        ),
+        # other cities' warnings are ignored
+        ([{"code": "03", "status": "issued"}], "2710000", []),
+        # unknown codes fall back to a generic label
+        ([{"code": "99", "status": "issued"}], CITY, ["weather advisory"]),
+    ],
+)
+def test_active_warnings(warnings, city, expected):
+    assert weather.active_warnings(warning_json(warnings, city=city), CITY) == expected
 
 
 # ---- today_max_pop ---------------------------------------------------
 
 
-def test_today_max_pop_picks_today_only():
-    data = forecast_json(
-        [
-            "2026-06-12T06:00:00+09:00",
-            "2026-06-12T12:00:00+09:00",
-            "2026-06-13T00:00:00+09:00",
-        ],
-        ["20", "60", "90"],  # tomorrow's 90 must not count
-    )
-    assert weather.today_max_pop(data, TODAY) == 60
-
-
-def test_today_max_pop_skips_blank_slots():
-    data = forecast_json(
-        ["2026-06-12T00:00:00+09:00", "2026-06-12T06:00:00+09:00"], ["", "30"]
-    )
-    assert weather.today_max_pop(data, TODAY) == 30
+@pytest.mark.parametrize(
+    "time_defines, pops, expected",
+    [
+        # tomorrow's 90 must not count
+        (
+            [
+                "2026-06-12T06:00:00+09:00",
+                "2026-06-12T12:00:00+09:00",
+                "2026-06-13T00:00:00+09:00",
+            ],
+            ["20", "60", "90"],
+            60,
+        ),
+        # blank slots are skipped
+        (["2026-06-12T00:00:00+09:00", "2026-06-12T06:00:00+09:00"], ["", "30"], 30),
+    ],
+)
+def test_today_max_pop(time_defines, pops, expected):
+    assert weather.today_max_pop(forecast_json(time_defines, pops), TODAY) == expected
 
 
 def test_today_max_pop_handles_garbage():
@@ -102,36 +109,42 @@ def judge(warnings_data, forecast_data, threshold=50):
     )
 
 
-def test_judge_warning_takes_priority():
-    data = warning_json([{"code": "03", "status": "issued"}])
-    rainy = forecast_json(["2026-06-12T06:00:00+09:00"], ["80"])
-    line = judge(data, rainy)
-    assert line == "Warnings active: Heavy Rain Warning. Stay safe!"
-
-
-def test_judge_two_warnings_listed():
-    data = warning_json(
-        [
-            {"code": "03", "status": "issued"},
-            {"code": "04", "status": "issued"},
-            {"code": "14", "status": "issued"},  # third one not listed
-        ]
-    )
-    line = judge(data, NORMAL_FORECAST)
-    assert line == "Warnings active: Heavy Rain Warning, Flood Warning. Stay safe!"
+@pytest.mark.parametrize(
+    "warnings, forecast_data, expected",
+    [
+        # a warning beats even an 80% rain forecast
+        (
+            [{"code": "03", "status": "issued"}],
+            forecast_json(["2026-06-12T06:00:00+09:00"], ["80"]),
+            "Warnings active: Heavy Rain Warning. Stay safe!",
+        ),
+        (
+            [
+                {"code": "03", "status": "issued"},
+                {"code": "04", "status": "issued"},
+                {"code": "14", "status": "issued"},  # third one not listed
+            ],
+            NORMAL_FORECAST,
+            "Warnings active: Heavy Rain Warning, Flood Warning. Stay safe!",
+        ),
+    ],
+)
+def test_judge_warning_takes_priority(warnings, forecast_data, expected):
+    assert judge(warning_json(warnings), forecast_data) == expected
 
 
 def test_judge_rain_at_threshold():
-    data = warning_json([{"code": "21", "status": "cancelled"}])
     rainy = forecast_json(["2026-06-12T12:00:00+09:00"], ["50"])
-    line = judge(data, rainy)
+    line = judge(NO_WARNINGS, rainy)
     assert line == "Rain likely today, 50% chance. Don't forget your umbrella."
 
 
-def test_judge_normal_day_is_silent():
-    data = warning_json([{"code": "21", "status": "cancelled"}])
-    assert judge(data, NORMAL_FORECAST) is None
-
-
-def test_judge_no_pops_is_silent():
-    assert judge(warning_json([]), []) is None
+@pytest.mark.parametrize(
+    "warnings_data, forecast_data",
+    [
+        (NO_WARNINGS, NORMAL_FORECAST),  # fine weather, no active warnings
+        (warning_json([]), []),  # no pops present at all
+    ],
+)
+def test_judge_silent(warnings_data, forecast_data):
+    assert judge(warnings_data, forecast_data) is None
