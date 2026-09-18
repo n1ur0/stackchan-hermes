@@ -72,6 +72,7 @@ from typing import TYPE_CHECKING, Any
 from . import presence_report, sensors
 from .event_log import rotate_old_entries
 from .heartbeat import is_quiet, parse_quiet_hours
+from .statefile import atomic_write_text, env_path, env_path_or_default
 
 if TYPE_CHECKING:
     from .gateway import Gateway
@@ -174,9 +175,7 @@ class PresenceState(str, Enum):
 
 
 def _state_path() -> Path:
-    return Path(
-        os.getenv("STACKCHAN_PRESENCE_STATE", "") or DEFAULT_STATE_PATH
-    ).expanduser()
+    return env_path_or_default("STACKCHAN_PRESENCE_STATE", DEFAULT_STATE_PATH)
 
 
 def _resolve_log_path() -> Path | None:
@@ -187,13 +186,7 @@ def _resolve_log_path() -> Path | None:
     - Empty or ``"off"`` -> None (disabled).
     - Any other value -> that path (``~`` expanded).
     """
-    raw = os.getenv("STACKCHAN_PRESENCE_LOG")
-    if raw is None:
-        return Path(DEFAULT_LOG_PATH).expanduser()
-    stripped = raw.strip()
-    if not stripped or stripped.lower() == "off":
-        return None
-    return Path(stripped).expanduser()
+    return env_path("STACKCHAN_PRESENCE_LOG", DEFAULT_LOG_PATH, blank_as_disabled=True)
 
 
 def _resolve_report_dir() -> Path | None:
@@ -204,26 +197,12 @@ def _resolve_report_dir() -> Path | None:
     caller additionally gates this on the log being enabled (a report
     without a log has no data to aggregate).
     """
-    raw = os.getenv("STACKCHAN_PRESENCE_REPORT")
-    if raw is None:
-        return Path(DEFAULT_REPORT_DIR).expanduser()
-    stripped = raw.strip()
-    if not stripped or stripped.lower() == "off":
-        return None
-    return Path(stripped).expanduser()
+    return env_path("STACKCHAN_PRESENCE_REPORT", DEFAULT_REPORT_DIR, blank_as_disabled=True)
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` atomically (write-temp + os.replace)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fp:
-            fp.write(text)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+    atomic_write_text(path, text)
 
 
 def _clamp_absent_after(value: Any) -> int:

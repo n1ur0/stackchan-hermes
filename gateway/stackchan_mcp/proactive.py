@@ -71,10 +71,8 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import datetime as _dt
-import json
 import logging
 import os
-import tempfile
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -83,6 +81,7 @@ from . import activity_log
 from .audio_stream import is_recording
 from .heartbeat import is_quiet, parse_quiet_hours
 from .presence import PresenceState
+from .statefile import env_float, read_json_dict, write_json_atomic
 
 if TYPE_CHECKING:
     from .gateway import Gateway
@@ -179,14 +178,7 @@ _ALL_TRANSITIONS: tuple[_Transition, ...] = (
 
 def _env_number(name: str, default: float) -> float:
     """A numeric env var, warning and falling back on garbage."""
-    raw = os.getenv(name, "")
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning("proactive: invalid %s=%r; using %s", name, raw, default)
-        return default
+    return env_float(name, default, logger)
 
 
 def _parse_transitions(raw: str) -> set[str]:
@@ -516,31 +508,12 @@ class ProactiveSpeaker:
         self._save_state()
 
     def _load_state(self) -> dict[str, Any]:
-        path = self._config.state_path
-        try:
-            data = json.loads(path.read_text("utf-8"))
-            return data if isinstance(data, dict) else {}
-        except FileNotFoundError:
-            return {}
-        except (OSError, ValueError) as exc:
-            logger.warning("proactive: unreadable state file %s (%s)", path, exc)
-            return {}
+        return read_json_dict(self._config.state_path, logger=logger, label="proactive")
 
     def _save_state(self) -> None:
-        # Atomic write (write-temp + os.replace), same flavour as the
-        # heartbeat/control state files: a crash mid-write must not
-        # truncate the day's speak-count into garbage.
         path = self._config.state_path
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as fp:
-                    json.dump(self._state, fp, ensure_ascii=False)
-                os.replace(tmp, path)
-            finally:
-                if os.path.exists(tmp):
-                    os.unlink(tmp)
+            write_json_atomic(path, self._state)
         except OSError as exc:
             logger.warning("proactive: cannot write state file %s (%s)", path, exc)
 
