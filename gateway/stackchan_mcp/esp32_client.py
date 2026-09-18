@@ -38,7 +38,10 @@ from .protocol import HelloResponse, make_mcp_message, parse_jsonrpc_response
 logger = logging.getLogger(__name__)
 
 # Timeout for waiting for ESP32 responses
-RESPONSE_TIMEOUT = 10.0
+#: Max seconds to wait for an ESP32 WS response to a tools/call
+#: request. ``STACKCHAN_DEVICE_TIMEOUT`` overrides for noisy WiFi links
+#: (weak signal + power-save can spike latency beyond 10 s).
+RESPONSE_TIMEOUT = float(os.getenv("STACKCHAN_DEVICE_TIMEOUT", "10.0"))
 
 ToolCall = tuple[str, dict[str, Any]]
 ToolCallResult = tuple[Any, dict[str, Any] | None]
