@@ -25,6 +25,16 @@ from .proactive import ProactiveSpeaker
 logger = logging.getLogger(__name__)
 
 
+def _gateway_token() -> str:
+    """The gateway's shared device token (STACKCHAN_TOKEN / BEARER_TOKEN)."""
+    return os.getenv("STACKCHAN_TOKEN") or os.getenv("BEARER_TOKEN") or ""
+
+
+def _token_or_default(specific: str | None, shared: str) -> str:
+    """A specific token override, else the shared gateway token."""
+    return specific or shared
+
+
 def _record_presence_transition(old: PresenceState, new: PresenceState) -> None:
     """Activity-feed listener: log a real occupancy flip (e.g. active→quiet).
 
@@ -170,11 +180,8 @@ class Gateway:
         WebSocket token so remote capture uploads are protected whenever the
         gateway itself is protected.
         """
-        return (
-            os.getenv("VISION_TOKEN")
-            or os.getenv("STACKCHAN_TOKEN")
-            or os.getenv("BEARER_TOKEN")
-            or ""
+        return _token_or_default(
+            os.getenv("VISION_TOKEN"), _gateway_token()
         )
 
     @property
@@ -199,11 +206,8 @@ class Gateway:
         STACKCHAN_AUDIO_HOOK_TOKEN can be set separately. Falls back to
         STACKCHAN_TOKEN so a single-token setup works out of the box.
         """
-        return (
-            os.getenv("STACKCHAN_AUDIO_HOOK_TOKEN")
-            or os.getenv("STACKCHAN_TOKEN")
-            or os.getenv("BEARER_TOKEN")
-            or ""
+        return _token_or_default(
+            os.getenv("STACKCHAN_AUDIO_HOOK_TOKEN"), _gateway_token()
         )
 
     @property
@@ -217,11 +221,8 @@ class Gateway:
         / BEARER_TOKEN when STACKCHAN_PCM_TOKEN is not configured so
         single-token local development keeps working.
         """
-        return (
-            os.getenv("STACKCHAN_PCM_TOKEN")
-            or os.getenv("STACKCHAN_TOKEN")
-            or os.getenv("BEARER_TOKEN")
-            or ""
+        return _token_or_default(
+            os.getenv("STACKCHAN_PCM_TOKEN"), _gateway_token()
         )
 
     async def start(self, *, advertise_mdns: bool = True) -> None:

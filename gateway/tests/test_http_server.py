@@ -23,7 +23,6 @@ from stackchan_mcp.http_server import (
 from stackchan_mcp import sensors
 from stackchan_mcp.queue import CommandQueue, QueueFull, QueueItem, build_queue_full_error
 
-
 class FakeESP32:
     def __init__(self, *, connected: bool = True) -> None:
         self.device_connected = connected
@@ -46,11 +45,9 @@ class FakeESP32:
             ],
         }, None
 
-
 class FakeGateway:
     def __init__(self, *, connected: bool = True) -> None:
         self.esp32 = FakeESP32(connected=connected)
-
 
 @contextlib.asynccontextmanager
 async def _client(app, *, base_url: str = "http://127.0.0.1:8767") -> AsyncIterator[httpx.AsyncClient]:
@@ -59,7 +56,6 @@ async def _client(app, *, base_url: str = "http://127.0.0.1:8767") -> AsyncItera
         async with httpx.AsyncClient(transport=transport, base_url=base_url) as client:
             yield client
 
-
 def _headers(session_id: str | None = None, token: str | None = None) -> dict[str, str]:
     headers = {"accept": "application/json"}
     if session_id is not None:
@@ -67,7 +63,6 @@ def _headers(session_id: str | None = None, token: str | None = None) -> dict[st
     if token is not None:
         headers["authorization"] = f"Bearer {token}"
     return headers
-
 
 async def _initialize(client: httpx.AsyncClient, *, token: str | None = None, request_id: int = 1) -> str:
     response = await client.post(
@@ -94,7 +89,6 @@ async def _initialize(client: httpx.AsyncClient, *, token: str | None = None, re
     assert initialized.status_code == 202
     return session_id
 
-
 async def _call_tool(
     client: httpx.AsyncClient,
     *,
@@ -115,14 +109,12 @@ async def _call_tool(
         headers=_headers(session_id, token),
     )
 
-
 async def _wait_for_queue_depth(queue: CommandQueue, depth: int) -> None:
     for _ in range(50):
         if queue.depth == depth:
             return
         await asyncio.sleep(0.01)
     raise AssertionError(f"queue depth did not reach {depth}")
-
 
 class GatedCommandQueue(CommandQueue):
     def __init__(self, capacity: int) -> None:
@@ -142,7 +134,6 @@ class GatedCommandQueue(CommandQueue):
         self.get_started.set()
         await self.allow_get.wait()
         return await super().get()
-
 
 @pytest.mark.asyncio
 async def test_queue_ordering_fifo_completion() -> None:
@@ -179,7 +170,6 @@ async def test_queue_ordering_fifo_completion() -> None:
     assert observed == ["tool-0", "tool-1", "tool-2"]
     assert results == observed
 
-
 @pytest.mark.asyncio
 async def test_queue_full_returns_jsonrpc_error_response() -> None:
     queue = CommandQueue(capacity=1)
@@ -211,7 +201,6 @@ async def test_queue_full_returns_jsonrpc_error_response() -> None:
     payload = second.json()
     assert payload["id"] == 11
     assert payload["error"] == build_queue_full_error(1)
-
 
 @pytest.mark.asyncio
 async def test_cancelled_client_item_is_not_dispatched() -> None:
@@ -254,7 +243,6 @@ async def test_cancelled_client_item_is_not_dispatched() -> None:
         await asyncio.sleep(0.01)
 
     assert dispatched == []
-
 
 @pytest.mark.asyncio
 async def test_lifespan_shutdown_drains_pending_queue_items() -> None:
@@ -302,7 +290,6 @@ async def test_lifespan_shutdown_drains_pending_queue_items() -> None:
         assert result.message == "stackchan MCP HTTP server is shutting down"
         assert result.data == {"reason": "server_shutdown"}
 
-
 @pytest.mark.asyncio
 async def test_auth_rejection_and_successful_bearer_reaches_dispatcher() -> None:
     queue = CommandQueue(capacity=4)
@@ -347,7 +334,6 @@ async def test_auth_rejection_and_successful_bearer_reaches_dispatcher() -> None
     assert ok.status_code == 200
     assert dispatched == ["get_device_info"]
 
-
 @pytest.mark.asyncio
 async def test_host_and_origin_rebinding_guards_return_403() -> None:
     app = build_app(
@@ -372,7 +358,6 @@ async def test_host_and_origin_rebinding_guards_return_403() -> None:
     assert bad_host.text == HOST_FAILURE_MESSAGE
     assert bad_origin.status_code == 403
     assert bad_origin.text == ORIGIN_FAILURE_MESSAGE
-
 
 @pytest.mark.asyncio
 async def test_wildcard_bind_allows_loopback_and_configured_hosts(
@@ -404,7 +389,6 @@ async def test_wildcard_bind_allows_loopback_and_configured_hosts(
     assert loopback.status_code == 200
     assert lan.status_code == 200
     assert origin.status_code == 200
-
 
 @pytest.mark.asyncio
 async def test_response_correlation_for_two_concurrent_clients() -> None:
@@ -460,7 +444,6 @@ async def test_response_correlation_for_two_concurrent_clients() -> None:
     assert body_a["client_request_id"] == "client-a"
     assert body_b["client_request_id"] == "client-b"
 
-
 @pytest.mark.asyncio
 async def test_bypass_tool_get_status_does_not_enter_dispatcher() -> None:
     assert BYPASS_TOOLS == frozenset(
@@ -498,7 +481,6 @@ async def test_bypass_tool_get_status_does_not_enter_dispatcher() -> None:
     status = json.loads(payload["result"]["content"][0]["text"])
     assert status["connected"] is True
     assert queue.depth == 0
-
 
 @pytest.mark.asyncio
 async def test_switchbot_tools_exposed_and_bypass_device_queue(monkeypatch) -> None:
@@ -543,7 +525,6 @@ async def test_switchbot_tools_exposed_and_bypass_device_queue(monkeypatch) -> N
     assert "SWITCHBOT_TOKEN" in payload["error"]
     assert queue.depth == 0
 
-
 @pytest.mark.asyncio
 async def test_dispatcher_returns_stdio_disconnect_payload_as_tool_result() -> None:
     queue = CommandQueue(capacity=2)
@@ -569,7 +550,6 @@ async def test_dispatcher_returns_stdio_disconnect_payload_as_tool_result() -> N
     assert "error" not in payload
     result_text = payload["result"]["content"][0]["text"]
     assert json.loads(result_text) == DISCONNECTED_DEVICE_PAYLOAD
-
 
 @pytest.mark.asyncio
 async def test_healthz_is_liveness_only_and_status_requires_auth_for_details() -> None:
@@ -602,7 +582,6 @@ async def test_healthz_is_liveness_only_and_status_requires_auth_for_details() -
     assert status_payload["owner_id"] == "owner-test"
     assert status_payload["connected_clients"] == 0
 
-
 @pytest.mark.asyncio
 async def test_command_queue_raises_queue_full_directly() -> None:
     queue = CommandQueue(capacity=1)
@@ -631,9 +610,7 @@ async def test_command_queue_raises_queue_full_directly() -> None:
             )
         )
 
-
 # ---- Phase F dashboard /control/* routes -----------------------------
-
 
 class FakeHeartbeat:
     def __init__(self, *, gestures: bool = True, speak: bool = False, interval: float = 30.0):
@@ -647,7 +624,6 @@ class FakeHeartbeat:
 
     def set_gestures(self, enabled: bool) -> None:
         self._gestures = bool(enabled)
-
 
 class ControlFakeESP32:
     def __init__(self, *, connected: bool = True) -> None:
@@ -671,7 +647,6 @@ class ControlFakeESP32:
 
     async def send_listen_state(self, state: str, mode: str = "manual") -> None:
         self.listen_calls.append((state, mode))
-
 
 class FakePresenceMonitor:
     """Stand-in for PresenceMonitor in HTTP handler tests.
@@ -730,7 +705,6 @@ class FakePresenceMonitor:
             },
         }
 
-
 class ControlFakeGateway:
     def __init__(
         self,
@@ -746,14 +720,12 @@ class ControlFakeGateway:
         self._proactive = proactive
         self.voice_turn_active = False
 
-
 @pytest.fixture(autouse=True)
 def _control_state_path(monkeypatch, tmp_path):
     monkeypatch.setenv(
         "STACKCHAN_CONTROL_STATE", str(tmp_path / "control_state.json")
     )
     monkeypatch.setenv("STACKCHAN_PRESETS_DIR", str(tmp_path / "presets"))
-
 
 def _build_control_app(gateway, *, token: str | None = None):
     return build_app(
@@ -764,7 +736,6 @@ def _build_control_app(gateway, *, token: str | None = None):
         port=8767,
         token=token,
     )
-
 
 @pytest.mark.asyncio
 async def test_control_status_connected_reports_full_payload() -> None:
@@ -787,7 +758,6 @@ async def test_control_status_connected_reports_full_payload() -> None:
     assert body["heartbeat"] == {"gestures": True, "speak": True, "interval_min": 30.0}
     assert body["proximity"] == {"mode": "listen", "threshold": 600}
 
-
 @pytest.mark.asyncio
 async def test_control_status_disconnected_nulls_device_fields() -> None:
     gateway = ControlFakeGateway(connected=False, heartbeat=None)
@@ -802,85 +772,107 @@ async def test_control_status_disconnected_nulls_device_fields() -> None:
     assert body["heartbeat"] is None
     assert body["proximity"] is None
 
+# Control "scalar setter" families: volume / brightness / led_brightness /
+# mic_gain / head / neutral_pose all share the same three-way shape —
+# sets-and-persists, rejects out-of-range, 503 when disconnected. One table
+# drives all six; every assertion below mirrors the original per-endpoint
+# tests exactly (response payloads, device tool calls, error statuses).
+_SCALAR_FAMILIES = [
+    {
+        "name": "volume",
+        "path": "/control/volume",
+        "set_body": {"volume": 70},
+        "set_resp": {"ok": True, "volume": 70, "muted": False},
+        "set_call": ("self.audio_speaker.set_volume", {"volume": 70}),
+        "bad_bodies": [{"volume": 200}],
+        "has_503": True,
+    },
+    {
+        "name": "brightness",
+        "path": "/control/brightness",
+        "set_body": {"brightness": 40},
+        "set_resp": {"ok": True, "brightness": 40},
+        "set_call": ("self.screen.set_brightness", {"brightness": 40}),
+        "bad_bodies": [{"brightness": 200}],
+        "has_503": True,
+    },
+    {
+        "name": "led_brightness",
+        "path": "/control/led_brightness",
+        "set_body": {"brightness": 60},
+        "set_resp": {"ok": True, "brightness": 60},
+        "set_call": None,
+        "bad_bodies": [{"brightness": 200}],
+        "has_503": False,
+    },
+    {
+        "name": "mic_gain",
+        "path": "/control/mic_gain",
+        "set_body": {"gain": 24},
+        "set_resp": {"ok": True, "gain": 24, "connected": True},
+        "set_call": ("self.audio_speaker.set_mic_gain", {"gain": 24}),
+        "bad_bodies": [{"gain": 37}, {"gain": -1}],
+        "has_503": True,
+    },
+    {
+        "name": "head",
+        "path": "/control/head",
+        "set_body": {"yaw": 25, "pitch": 55},
+        "set_resp": {"ok": True, "yaw": 25, "pitch": 55, "connected": True},
+        "set_call": ("self.robot.set_head_angles", {"yaw": 25, "pitch": 55}),
+        "bad_bodies": [{"yaw": 200, "pitch": 30}, {"yaw": 0, "pitch": 1}],
+        "has_503": True,
+    },
+    {
+        "name": "neutral_pose",
+        "path": "/control/neutral_pose",
+        "set_body": {"yaw": -10, "pitch": 40},
+        "set_resp": {"ok": True, "yaw": -10, "pitch": 40, "connected": True},
+        "set_call": ("self.robot.set_neutral_pose", {"yaw": -10, "pitch": 40}),
+        "bad_bodies": [{"yaw": 0, "pitch": 999}],
+        "has_503": True,
+    },
+]
 
 @pytest.mark.asyncio
-async def test_control_volume_sets_and_persists() -> None:
+@pytest.mark.parametrize("family", _SCALAR_FAMILIES, ids=[f["name"] for f in _SCALAR_FAMILIES])
+async def test_control_scalar_sets_and_persists(family) -> None:
     gateway = ControlFakeGateway()
     app = _build_control_app(gateway)
     async with _client(app) as client:
-        resp = await client.post("/control/volume", json={"volume": 70})
+        resp = await client.post(family["path"], json=family["set_body"])
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "volume": 70, "muted": False}
-    assert ("self.audio_speaker.set_volume", {"volume": 70}) in gateway.esp32.calls
-
+    assert resp.json() == family["set_resp"]
+    if family["set_call"] is not None:
+        assert family["set_call"] in gateway.esp32.calls
 
 @pytest.mark.asyncio
-async def test_control_volume_rejects_out_of_range() -> None:
+@pytest.mark.parametrize(
+    "family",
+    [f for f in _SCALAR_FAMILIES if f["bad_bodies"]],
+    ids=[f["name"] for f in _SCALAR_FAMILIES if f["bad_bodies"]],
+)
+async def test_control_scalar_rejects_out_of_range(family) -> None:
     gateway = ControlFakeGateway()
     app = _build_control_app(gateway)
     async with _client(app) as client:
-        resp = await client.post("/control/volume", json={"volume": 200})
-    assert resp.status_code == 400
-    assert resp.json()["ok"] is False
-
+        for bad in family["bad_bodies"]:
+            resp = await client.post(family["path"], json=bad)
+            assert resp.status_code == 400
+            assert resp.json()["ok"] is False
 
 @pytest.mark.asyncio
-async def test_control_volume_503_when_disconnected() -> None:
+@pytest.mark.parametrize(
+    "family",
+    [f for f in _SCALAR_FAMILIES if f["has_503"]],
+    ids=[f["name"] for f in _SCALAR_FAMILIES if f["has_503"]],
+)
+async def test_control_scalar_503_when_disconnected(family) -> None:
     gateway = ControlFakeGateway(connected=False)
     app = _build_control_app(gateway)
     async with _client(app) as client:
-        resp = await client.post("/control/volume", json={"volume": 70})
+        resp = await client.post(family["path"], json=family["set_body"])
     assert resp.status_code == 503
-
-
-@pytest.mark.asyncio
-async def test_control_brightness_sets_and_persists() -> None:
-    gateway = ControlFakeGateway()
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.post("/control/brightness", json={"brightness": 40})
-    assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "brightness": 40}
-    assert ("self.screen.set_brightness", {"brightness": 40}) in gateway.esp32.calls
-
-
-@pytest.mark.asyncio
-async def test_control_brightness_rejects_out_of_range() -> None:
-    gateway = ControlFakeGateway()
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.post("/control/brightness", json={"brightness": 200})
-    assert resp.status_code == 400
-    assert resp.json()["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_control_brightness_503_when_disconnected() -> None:
-    gateway = ControlFakeGateway(connected=False)
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.post("/control/brightness", json={"brightness": 40})
-    assert resp.status_code == 503
-
-
-@pytest.mark.asyncio
-async def test_control_led_brightness_sets_and_persists() -> None:
-    gateway = ControlFakeGateway()
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.post("/control/led_brightness", json={"brightness": 60})
-    assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "brightness": 60}
-
-
-@pytest.mark.asyncio
-async def test_control_led_brightness_rejects_out_of_range() -> None:
-    gateway = ControlFakeGateway()
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.post("/control/led_brightness", json={"brightness": 200})
-    assert resp.status_code == 400
-
 
 @pytest.mark.asyncio
 async def test_control_led_idle_on_sets_all() -> None:
@@ -894,7 +886,6 @@ async def test_control_led_idle_on_sets_all() -> None:
     assert resp.json()["led"]["idle"] == {"on": True, "r": 10, "g": 20, "b": 30}
     assert ("self.led.set_all", {"r": 10, "g": 20, "b": 30}) in gateway.esp32.calls
 
-
 @pytest.mark.asyncio
 async def test_control_led_idle_off_clears() -> None:
     gateway = ControlFakeGateway()
@@ -903,7 +894,6 @@ async def test_control_led_idle_off_clears() -> None:
         resp = await client.post("/control/led", json={"slot": "idle", "on": False})
     assert resp.status_code == 200
     assert ("self.led.clear", {}) in gateway.esp32.calls
-
 
 @pytest.mark.asyncio
 async def test_control_led_listening_persists_without_device_call() -> None:
@@ -917,7 +907,6 @@ async def test_control_led_listening_persists_without_device_call() -> None:
     assert resp.json()["led"]["listening"] == {"r": 5, "g": 6, "b": 7}
     assert gateway.esp32.calls == []  # listening is persisted only
 
-
 @pytest.mark.asyncio
 async def test_control_led_rejects_unknown_slot() -> None:
     gateway = ControlFakeGateway()
@@ -925,7 +914,6 @@ async def test_control_led_rejects_unknown_slot() -> None:
     async with _client(app) as client:
         resp = await client.post("/control/led", json={"slot": "nope", "r": 1})
     assert resp.status_code == 400
-
 
 @pytest.mark.asyncio
 async def test_control_led_rejects_bad_rgb() -> None:
@@ -938,7 +926,6 @@ async def test_control_led_rejects_bad_rgb() -> None:
     assert resp.status_code == 400
     assert resp.json()["ok"] is False
 
-
 @pytest.mark.asyncio
 async def test_control_led_idle_requires_boolean_on() -> None:
     gateway = ControlFakeGateway()
@@ -947,7 +934,6 @@ async def test_control_led_idle_requires_boolean_on() -> None:
         resp = await client.post("/control/led", json={"slot": "idle", "on": "yes"})
     assert resp.status_code == 400
 
-
 @pytest.mark.asyncio
 async def test_control_led_503_when_disconnected() -> None:
     gateway = ControlFakeGateway(connected=False)
@@ -955,7 +941,6 @@ async def test_control_led_503_when_disconnected() -> None:
     async with _client(app) as client:
         resp = await client.post("/control/led", json={"slot": "idle", "on": True})
     assert resp.status_code == 503
-
 
 @pytest.mark.asyncio
 async def test_control_led_test_previews_slot(monkeypatch) -> None:
@@ -972,7 +957,6 @@ async def test_control_led_test_previews_slot(monkeypatch) -> None:
     assert ("self.led.set_all", {"r": 148, "g": 108, "b": 255}) in gateway.esp32.calls
     assert ("self.led.clear", {}) in gateway.esp32.calls
 
-
 @pytest.mark.asyncio
 async def test_control_led_test_rejects_unknown_slot() -> None:
     gateway = ControlFakeGateway()
@@ -980,7 +964,6 @@ async def test_control_led_test_rejects_unknown_slot() -> None:
     async with _client(app) as client:
         resp = await client.post("/control/led_test", json={"slot": "nope"})
     assert resp.status_code == 400
-
 
 @pytest.mark.asyncio
 async def test_control_mute_then_unmute() -> None:
@@ -993,7 +976,6 @@ async def test_control_mute_then_unmute() -> None:
     assert muted.json() == {"ok": True, "volume": 0, "muted": True}
     assert unmuted.json() == {"ok": True, "volume": 60, "muted": False}
 
-
 @pytest.mark.asyncio
 async def test_control_mute_requires_boolean() -> None:
     gateway = ControlFakeGateway()
@@ -1001,7 +983,6 @@ async def test_control_mute_requires_boolean() -> None:
     async with _client(app) as client:
         resp = await client.post("/control/mute", json={"muted": "yes"})
     assert resp.status_code == 400
-
 
 @pytest.mark.asyncio
 async def test_control_listen_triggers_start(monkeypatch) -> None:
@@ -1016,7 +997,6 @@ async def test_control_listen_triggers_start(monkeypatch) -> None:
     assert resp.json() == {"ok": True}
     assert gateway.esp32.listen_calls == [("start", "manual")]
 
-
 @pytest.mark.asyncio
 async def test_control_listen_already_listening_returns_409(monkeypatch) -> None:
     import stackchan_mcp.audio_stream as audio_stream
@@ -1028,7 +1008,6 @@ async def test_control_listen_already_listening_returns_409(monkeypatch) -> None
         resp = await client.post("/control/listen")
     assert resp.status_code == 409
     assert resp.json() == {"ok": False, "error": "already listening"}
-
 
 @pytest.mark.asyncio
 async def test_control_proximity_dispatches() -> None:
@@ -1045,7 +1024,6 @@ async def test_control_proximity_dispatches() -> None:
         {"mode": "reflex", "threshold": 700},
     ) in gateway.esp32.calls
 
-
 @pytest.mark.asyncio
 async def test_control_proximity_validates_threshold() -> None:
     gateway = ControlFakeGateway()
@@ -1055,7 +1033,6 @@ async def test_control_proximity_validates_threshold() -> None:
             "/control/proximity", json={"mode": "listen", "threshold": 9999}
         )
     assert resp.status_code == 400
-
 
 @pytest.mark.asyncio
 async def test_control_proximity_validates_mode() -> None:
@@ -1067,7 +1044,6 @@ async def test_control_proximity_validates_mode() -> None:
         )
     assert resp.status_code == 400
 
-
 @pytest.mark.asyncio
 async def test_control_heartbeat_toggles_gestures() -> None:
     heartbeat = FakeHeartbeat(gestures=True)
@@ -1078,7 +1054,6 @@ async def test_control_heartbeat_toggles_gestures() -> None:
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "gestures": False}
     assert heartbeat.gestures_enabled is False
-
 
 @pytest.mark.asyncio
 async def test_control_routing_sets_force_hermes(monkeypatch) -> None:
@@ -1098,7 +1073,6 @@ async def test_control_routing_sets_force_hermes(monkeypatch) -> None:
         "multiturn": False,
     }
 
-
 @pytest.mark.asyncio
 async def test_control_multiturn_sets_enabled(monkeypatch) -> None:
     monkeypatch.delenv("STACKCHAN_LOCAL_LLM_MODEL", raising=False)
@@ -1113,7 +1087,6 @@ async def test_control_multiturn_sets_enabled(monkeypatch) -> None:
         body = (await client.get("/control/status")).json()
     assert body["routing"]["multiturn"] is True
 
-
 @pytest.mark.asyncio
 async def test_control_multiturn_rejects_non_bool() -> None:
     gateway = ControlFakeGateway()
@@ -1121,7 +1094,6 @@ async def test_control_multiturn_rejects_non_bool() -> None:
     async with _client(app) as client:
         resp = await client.post("/control/multiturn", json={"enabled": "yes"})
         assert resp.status_code == 400
-
 
 @pytest.mark.asyncio
 async def test_control_proactive_sets_enabled(monkeypatch) -> None:
@@ -1138,7 +1110,6 @@ async def test_control_proactive_sets_enabled(monkeypatch) -> None:
         body = (await client.get("/control/status")).json()
     assert body["proactive"] == {"enabled": True, "available": True}
 
-
 @pytest.mark.asyncio
 async def test_control_status_proactive_unavailable_when_no_speaker(monkeypatch) -> None:
     monkeypatch.delenv("STACKCHAN_PROACTIVE", raising=False)
@@ -1148,7 +1119,6 @@ async def test_control_status_proactive_unavailable_when_no_speaker(monkeypatch)
         body = (await client.get("/control/status")).json()
     assert body["proactive"]["available"] is False
     assert body["proactive"]["enabled"] is False  # default off
-
 
 @pytest.mark.asyncio
 async def test_control_proactive_rejects_non_bool() -> None:
@@ -1160,7 +1130,6 @@ async def test_control_proactive_rejects_non_bool() -> None:
         )
         assert resp.status_code == 400
 
-
 @pytest.mark.asyncio
 async def test_control_routing_rejects_non_bool() -> None:
     gateway = ControlFakeGateway()
@@ -1169,7 +1138,6 @@ async def test_control_routing_rejects_non_bool() -> None:
         resp = await client.post("/control/routing", json={"force_hermes": "yes"})
     assert resp.status_code == 400
 
-
 @pytest.mark.asyncio
 async def test_control_heartbeat_503_when_no_runner() -> None:
     gateway = ControlFakeGateway(heartbeat=None)
@@ -1177,7 +1145,6 @@ async def test_control_heartbeat_503_when_no_runner() -> None:
     async with _client(app) as client:
         resp = await client.post("/control/heartbeat", json={"gestures": True})
     assert resp.status_code == 503
-
 
 @pytest.mark.asyncio
 async def test_control_avatar_dispatches() -> None:
@@ -1189,7 +1156,6 @@ async def test_control_avatar_dispatches() -> None:
     assert resp.json() == {"ok": True, "face": "happy"}
     assert ("self.display.set_avatar", {"face": "happy"}) in gateway.esp32.calls
 
-
 @pytest.mark.asyncio
 async def test_control_avatar_rejects_unknown_face() -> None:
     gateway = ControlFakeGateway()
@@ -1197,7 +1163,6 @@ async def test_control_avatar_rejects_unknown_face() -> None:
     async with _client(app) as client:
         resp = await client.post("/control/avatar", json={"face": "angry"})
     assert resp.status_code == 400
-
 
 @pytest.mark.asyncio
 async def test_control_say_speaks(monkeypatch) -> None:
@@ -1218,7 +1183,6 @@ async def test_control_say_speaks(monkeypatch) -> None:
     assert resp.json() == {"ok": True, "tts": {"frame_count": 3}}
     assert seen["text"] == "hello"
 
-
 @pytest.mark.asyncio
 async def test_control_say_rejects_empty_and_too_long() -> None:
     gateway = ControlFakeGateway()
@@ -1228,7 +1192,6 @@ async def test_control_say_rejects_empty_and_too_long() -> None:
         long = await client.post("/control/say", json={"text": "a" * 201})
     assert empty.status_code == 400
     assert long.status_code == 400
-
 
 @pytest.mark.asyncio
 async def test_control_routes_require_token() -> None:
@@ -1247,7 +1210,6 @@ async def test_control_routes_require_token() -> None:
     assert wrong.status_code == 401
     assert ok.status_code == 200
 
-
 @pytest.mark.asyncio
 async def test_control_audio_level_idle(monkeypatch) -> None:
     import stackchan_mcp.audio_stream as audio_stream
@@ -1260,7 +1222,6 @@ async def test_control_audio_level_idle(monkeypatch) -> None:
         resp = await client.get("/control/audio_level")
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "recording": False, "level": 0.0}
-
 
 @pytest.mark.asyncio
 async def test_control_audio_level_recording(monkeypatch) -> None:
@@ -1277,7 +1238,6 @@ async def test_control_audio_level_recording(monkeypatch) -> None:
     assert body["recording"] is True
     assert body["level"] == 0.55
 
-
 @pytest.mark.asyncio
 async def test_control_audio_level_requires_token() -> None:
     gateway = ControlFakeGateway()
@@ -1290,23 +1250,7 @@ async def test_control_audio_level_requires_token() -> None:
     assert missing.status_code == 401
     assert ok.status_code == 200
 
-
 # ---- mic gain ---------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_control_mic_gain_sets_and_persists() -> None:
-    gateway = ControlFakeGateway()
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.post("/control/mic_gain", json={"gain": 24})
-    assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "gain": 24, "connected": True}
-    assert (
-        "self.audio_speaker.set_mic_gain",
-        {"gain": 24},
-    ) in gateway.esp32.calls
-
 
 @pytest.mark.asyncio
 async def test_control_mic_gain_reflected_in_status() -> None:
@@ -1316,120 +1260,6 @@ async def test_control_mic_gain_reflected_in_status() -> None:
         await client.post("/control/mic_gain", json={"gain": 12})
         status = await client.get("/control/status")
     assert status.json()["mic_gain"] == 12
-
-
-@pytest.mark.asyncio
-async def test_control_mic_gain_rejects_out_of_range() -> None:
-    gateway = ControlFakeGateway()
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        too_high = await client.post("/control/mic_gain", json={"gain": 37})
-        negative = await client.post("/control/mic_gain", json={"gain": -1})
-    assert too_high.status_code == 400
-    assert too_high.json()["ok"] is False
-    assert negative.status_code == 400
-
-
-@pytest.mark.asyncio
-async def test_control_mic_gain_503_when_disconnected() -> None:
-    gateway = ControlFakeGateway(connected=False)
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.post("/control/mic_gain", json={"gain": 20})
-    assert resp.status_code == 503
-
-
-# ---- /control/head ----------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_control_head_moves_live() -> None:
-    gateway = ControlFakeGateway()
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.post("/control/head", json={"yaw": 25, "pitch": 55})
-    assert resp.status_code == 200
-    assert resp.json() == {
-        "ok": True,
-        "yaw": 25,
-        "pitch": 55,
-        "connected": True,
-    }
-    assert (
-        "self.robot.set_head_angles",
-        {"yaw": 25, "pitch": 55},
-    ) in gateway.esp32.calls
-
-
-@pytest.mark.asyncio
-async def test_control_head_rejects_out_of_range() -> None:
-    gateway = ControlFakeGateway()
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        bad_yaw = await client.post("/control/head", json={"yaw": 200, "pitch": 30})
-        bad_pitch = await client.post("/control/head", json={"yaw": 0, "pitch": 1})
-    assert bad_yaw.status_code == 400
-    assert bad_yaw.json()["ok"] is False
-    assert bad_pitch.status_code == 400
-
-
-@pytest.mark.asyncio
-async def test_control_head_503_when_disconnected() -> None:
-    gateway = ControlFakeGateway(connected=False)
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.post("/control/head", json={"yaw": 0, "pitch": 30})
-    assert resp.status_code == 503
-
-
-# ---- /control/neutral_pose --------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_control_neutral_pose_persists() -> None:
-    gateway = ControlFakeGateway()
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.post(
-            "/control/neutral_pose", json={"yaw": -10, "pitch": 40}
-        )
-    assert resp.status_code == 200
-    assert resp.json() == {
-        "ok": True,
-        "yaw": -10,
-        "pitch": 40,
-        "connected": True,
-    }
-    assert (
-        "self.robot.set_neutral_pose",
-        {"yaw": -10, "pitch": 40},
-    ) in gateway.esp32.calls
-
-
-@pytest.mark.asyncio
-async def test_control_neutral_pose_rejects_out_of_range() -> None:
-    gateway = ControlFakeGateway()
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.post(
-            "/control/neutral_pose", json={"yaw": 0, "pitch": 999}
-        )
-    assert resp.status_code == 400
-
-
-@pytest.mark.asyncio
-async def test_control_neutral_pose_503_when_disconnected() -> None:
-    gateway = ControlFakeGateway(connected=False)
-    app = _build_control_app(gateway)
-    async with _client(app) as client:
-        resp = await client.post(
-            "/control/neutral_pose", json={"yaw": 0, "pitch": 30}
-        )
-    assert resp.status_code == 503
-
-
-# ---- conversation log -------------------------------------------------
-
 
 @pytest.mark.asyncio
 async def test_control_conversation_empty() -> None:
@@ -1442,7 +1272,6 @@ async def test_control_conversation_empty() -> None:
         resp = await client.get("/control/conversation")
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "turns": []}
-
 
 @pytest.mark.asyncio
 async def test_control_conversation_returns_recorded_turns() -> None:
@@ -1462,7 +1291,6 @@ async def test_control_conversation_returns_recorded_turns() -> None:
     assert body["turns"][1]["timings_ms"] == {"total": 1500}
     control._CONVERSATION.clear()
 
-
 @pytest.mark.asyncio
 async def test_control_conversation_requires_token() -> None:
     gateway = ControlFakeGateway()
@@ -1475,9 +1303,7 @@ async def test_control_conversation_requires_token() -> None:
     assert missing.status_code == 401
     assert ok.status_code == 200
 
-
 # ---- mode presets -----------------------------------------------------
-
 
 @pytest.mark.asyncio
 async def test_control_presets_save_and_list() -> None:
@@ -1493,7 +1319,6 @@ async def test_control_presets_save_and_list() -> None:
     assert body["ok"] is True
     assert [p["name"] for p in body["presets"]] == ["night"]
 
-
 @pytest.mark.asyncio
 async def test_control_presets_save_requires_device() -> None:
     gateway = ControlFakeGateway(connected=False)
@@ -1502,7 +1327,6 @@ async def test_control_presets_save_requires_device() -> None:
         resp = await client.post("/control/presets/save", json={"name": "x"})
     assert resp.status_code == 503
 
-
 @pytest.mark.asyncio
 async def test_control_presets_save_rejects_bad_name() -> None:
     gateway = ControlFakeGateway()
@@ -1510,7 +1334,6 @@ async def test_control_presets_save_rejects_bad_name() -> None:
     async with _client(app) as client:
         resp = await client.post("/control/presets/save", json={"name": "../x"})
     assert resp.status_code == 400
-
 
 @pytest.mark.asyncio
 async def test_control_presets_save_conflict_without_overwrite() -> None:
@@ -1525,7 +1348,6 @@ async def test_control_presets_save_conflict_without_overwrite() -> None:
     assert first.status_code == 200
     assert dup.status_code == 409
     assert forced.status_code == 200
-
 
 @pytest.mark.asyncio
 async def test_control_presets_apply_resends_and_reports() -> None:
@@ -1546,7 +1368,6 @@ async def test_control_presets_apply_resends_and_reports() -> None:
     assert "self.touch.set_proximity_config" in tools
     assert control.load_state()["volume"] == 80
 
-
 @pytest.mark.asyncio
 async def test_control_presets_apply_not_found() -> None:
     gateway = ControlFakeGateway()
@@ -1554,7 +1375,6 @@ async def test_control_presets_apply_not_found() -> None:
     async with _client(app) as client:
         resp = await client.post("/control/presets/apply", json={"name": "ghost"})
     assert resp.status_code == 404
-
 
 @pytest.mark.asyncio
 async def test_control_presets_apply_busy_during_voice_turn() -> None:
@@ -1565,7 +1385,6 @@ async def test_control_presets_apply_busy_during_voice_turn() -> None:
         await client.post("/control/presets/save", json={"name": "scene"})
         resp = await client.post("/control/presets/apply", json={"name": "scene"})
     assert resp.status_code == 409
-
 
 @pytest.mark.asyncio
 async def test_control_presets_delete() -> None:
@@ -1580,9 +1399,7 @@ async def test_control_presets_delete() -> None:
     assert missing.status_code == 404
     assert listed.json()["presets"] == []
 
-
 # ---- POST /control/i2c (Port A sensor bring-up, "Port A") -----------------
-
 
 @pytest.mark.asyncio
 async def test_control_i2c_scan_dispatches() -> None:
@@ -1593,7 +1410,6 @@ async def test_control_i2c_scan_dispatches() -> None:
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
     assert ("self.i2c.scan", {}) in gateway.esp32.calls
-
 
 @pytest.mark.asyncio
 async def test_control_i2c_write_read_dispatches_who_am_i() -> None:
@@ -1611,7 +1427,6 @@ async def test_control_i2c_write_read_dispatches_who_am_i() -> None:
         {"addr": 0x5A, "write_bytes": [0x0F], "n_bytes": 1},
     ) in gateway.esp32.calls
 
-
 @pytest.mark.asyncio
 async def test_control_i2c_read_dispatches() -> None:
     gateway = ControlFakeGateway()
@@ -1623,7 +1438,6 @@ async def test_control_i2c_read_dispatches() -> None:
     assert resp.status_code == 200
     assert ("self.i2c.read", {"addr": 0x5A, "n_bytes": 2}) in gateway.esp32.calls
 
-
 @pytest.mark.asyncio
 async def test_control_i2c_write_dispatches() -> None:
     gateway = ControlFakeGateway()
@@ -1634,7 +1448,6 @@ async def test_control_i2c_write_dispatches() -> None:
         )
     assert resp.status_code == 200
     assert ("self.i2c.write", {"addr": 0x5A, "bytes": [0x20, 0x13]}) in gateway.esp32.calls
-
 
 @pytest.mark.asyncio
 async def test_control_i2c_surfaces_device_bytes() -> None:
@@ -1654,7 +1467,6 @@ async def test_control_i2c_surfaces_device_bytes() -> None:
     assert resp.status_code == 200
     assert resp.json()["bytes"] == [0xD3]  # WHO_AM_I reads back verbatim
 
-
 @pytest.mark.asyncio
 async def test_control_i2c_device_error_maps_502() -> None:
     gateway = ControlFakeGateway()
@@ -1672,7 +1484,6 @@ async def test_control_i2c_device_error_maps_502() -> None:
     assert resp.status_code == 502
     assert resp.json()["error"] == "ESP_ERR_TIMEOUT"
 
-
 @pytest.mark.asyncio
 async def test_control_i2c_rejects_unknown_op() -> None:
     gateway = ControlFakeGateway()
@@ -1681,7 +1492,6 @@ async def test_control_i2c_rejects_unknown_op() -> None:
         resp = await client.post("/control/i2c", json={"op": "nope"})
     assert resp.status_code == 400
     assert gateway.esp32.calls == []
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("addr", [0x07, 0x78, "0x5A", True, None])
@@ -1695,7 +1505,6 @@ async def test_control_i2c_rejects_out_of_range_addr(addr) -> None:
     assert resp.status_code == 400
     assert gateway.esp32.calls == []
 
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("n", [0, 257, True, "2", None])
 async def test_control_i2c_rejects_bad_n_bytes(n) -> None:
@@ -1706,7 +1515,6 @@ async def test_control_i2c_rejects_bad_n_bytes(n) -> None:
             "/control/i2c", json={"op": "read", "addr": 0x5A, "n_bytes": n}
         )
     assert resp.status_code == 400
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("data", [[], [256], [-1], [True], "x", [1, "2"]])
@@ -1719,7 +1527,6 @@ async def test_control_i2c_rejects_bad_bytes(data) -> None:
         )
     assert resp.status_code == 400
 
-
 @pytest.mark.asyncio
 async def test_control_i2c_503_when_disconnected() -> None:
     gateway = ControlFakeGateway(connected=False)
@@ -1727,7 +1534,6 @@ async def test_control_i2c_503_when_disconnected() -> None:
     async with _client(app) as client:
         resp = await client.post("/control/i2c", json={"op": "scan"})
     assert resp.status_code == 503
-
 
 def _sensor_call_tool(reg_map, *, recorded=None):
     """Programmable esp32.call_tool: serve register bytes for write_read,
@@ -1746,7 +1552,6 @@ def _sensor_call_tool(reg_map, *, recorded=None):
         return {"content": [{"type": "text", "text": json.dumps(payload)}]}, None
 
     return _fake
-
 
 @pytest.mark.asyncio
 async def test_control_sensors_reads_both() -> None:
@@ -1770,7 +1575,6 @@ async def test_control_sensors_reads_both() -> None:
     assert body["tmos"]["presence"] == 300
     assert body["tmos"]["ambient_c"] == 30.0
     assert body["gesture"]["gesture"] == "up"
-
 
 @pytest.mark.asyncio
 async def test_control_sensors_partial_error_stays_200() -> None:
@@ -1805,7 +1609,6 @@ async def test_control_sensors_partial_error_stays_200() -> None:
     assert body["tmos"]["present"] is False
     assert "error" in body["gesture"]
 
-
 @pytest.mark.asyncio
 async def test_control_sensors_503_when_disconnected() -> None:
     gateway = ControlFakeGateway(connected=False)
@@ -1813,7 +1616,6 @@ async def test_control_sensors_503_when_disconnected() -> None:
     async with _client(app) as client:
         resp = await client.get("/control/sensors")
     assert resp.status_code == 503
-
 
 @pytest.mark.asyncio
 async def test_control_sensors_init_writes_gesture_array() -> None:
@@ -1841,7 +1643,6 @@ async def test_control_sensors_init_writes_gesture_array() -> None:
     assert (0xEF, 0x00) in gesture_writes
     assert (0x41, 0xFF) in gesture_writes
 
-
 @pytest.mark.asyncio
 async def test_control_sensors_init_503_when_disconnected() -> None:
     gateway = ControlFakeGateway(connected=False)
@@ -1850,9 +1651,7 @@ async def test_control_sensors_init_503_when_disconnected() -> None:
         resp = await client.post("/control/sensors/init")
     assert resp.status_code == 503
 
-
 # ---- /control/presence (presence state machine) ----------------------
-
 
 @pytest.mark.asyncio
 async def test_control_presence_disabled_when_no_monitor() -> None:
@@ -1862,7 +1661,6 @@ async def test_control_presence_disabled_when_no_monitor() -> None:
         resp = await client.get("/control/presence")
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "enabled": False}
-
 
 @pytest.mark.asyncio
 async def test_control_presence_reports_snapshot() -> None:
@@ -1876,7 +1674,6 @@ async def test_control_presence_reports_snapshot() -> None:
     assert body["enabled"] is True
     assert body["state"] == "active"
     assert body["config"]["absent_after_s"] == 120
-
 
 @pytest.mark.asyncio
 async def test_control_presence_report_returns_payload() -> None:
@@ -1892,7 +1689,6 @@ async def test_control_presence_report_returns_payload() -> None:
     assert body["recommendation"]["auto_apply"] is False
     assert monitor.report_calls == [7]  # default days
 
-
 @pytest.mark.asyncio
 async def test_control_presence_report_days_query() -> None:
     monitor = FakePresenceMonitor()
@@ -1904,7 +1700,6 @@ async def test_control_presence_report_days_query() -> None:
         await client.get("/control/presence/report?days=abc")  # fallback to 7
     assert monitor.report_calls == [14, 28, 7]
 
-
 @pytest.mark.asyncio
 async def test_control_presence_report_disabled_when_no_monitor() -> None:
     gateway = ControlFakeGateway()  # presence not opted in
@@ -1913,7 +1708,6 @@ async def test_control_presence_report_disabled_when_no_monitor() -> None:
         resp = await client.get("/control/presence/report")
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "enabled": False}
-
 
 @pytest.mark.asyncio
 async def test_control_status_includes_presence_block() -> None:
@@ -1924,7 +1718,6 @@ async def test_control_status_includes_presence_block() -> None:
     assert resp.status_code == 200
     assert resp.json()["presence"]["state"] == "active"
 
-
 @pytest.mark.asyncio
 async def test_control_status_presence_disabled_without_monitor() -> None:
     gateway = ControlFakeGateway()
@@ -1932,7 +1725,6 @@ async def test_control_status_presence_disabled_without_monitor() -> None:
     async with _client(app) as client:
         resp = await client.get("/control/status")
     assert resp.json()["presence"] == {"enabled": False}
-
 
 @pytest.mark.asyncio
 async def test_control_presence_config_updates() -> None:
@@ -1948,7 +1740,6 @@ async def test_control_presence_config_updates() -> None:
     assert resp.json()["ok"] is True
     assert monitor.update_calls == [(60, "23:00-07:00")]
 
-
 @pytest.mark.asyncio
 async def test_control_presence_config_503_when_no_monitor() -> None:
     gateway = ControlFakeGateway()
@@ -1959,7 +1750,6 @@ async def test_control_presence_config_503_when_no_monitor() -> None:
         )
     assert resp.status_code == 503
 
-
 @pytest.mark.asyncio
 async def test_control_presence_config_400_when_empty() -> None:
     gateway = ControlFakeGateway(presence=FakePresenceMonitor())
@@ -1967,7 +1757,6 @@ async def test_control_presence_config_400_when_empty() -> None:
     async with _client(app) as client:
         resp = await client.post("/control/presence/config", json={})
     assert resp.status_code == 400
-
 
 @pytest.mark.asyncio
 async def test_control_presence_config_400_bad_absent_type() -> None:
@@ -1978,7 +1767,6 @@ async def test_control_presence_config_400_bad_absent_type() -> None:
             "/control/presence/config", json={"absent_after_s": "soon"}
         )
     assert resp.status_code == 400
-
 
 @pytest.mark.asyncio
 async def test_control_presence_config_400_on_bad_window() -> None:
