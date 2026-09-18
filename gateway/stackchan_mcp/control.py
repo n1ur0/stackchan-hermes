@@ -375,12 +375,17 @@ def routing_force_hermes() -> bool:
     return bool(load_state()["force_hermes"])
 
 
+def _persist_toggle(key: str, enabled: bool) -> dict[str, Any]:
+    """Persist one boolean control-toggle and echo the new value back."""
+    state = load_state()
+    state[key] = bool(enabled)
+    save_state(state)
+    return {"ok": True, key: bool(enabled)}
+
+
 def set_routing_force_hermes(enabled: bool) -> dict[str, Any]:
     """Persist the Hermes-pin toggle and echo the new value back."""
-    state = load_state()
-    state["force_hermes"] = bool(enabled)
-    save_state(state)
-    return {"ok": True, "force_hermes": bool(enabled)}
+    return _persist_toggle("force_hermes", enabled)
 
 
 def multiturn_enabled() -> bool:
@@ -397,10 +402,7 @@ def multiturn_enabled() -> bool:
 
 def set_multiturn(enabled: bool) -> dict[str, Any]:
     """Persist the multi-turn toggle and echo the new value back."""
-    state = load_state()
-    state["multiturn"] = bool(enabled)
-    save_state(state)
-    return {"ok": True, "multiturn": bool(enabled)}
+    return _persist_toggle("multiturn", enabled)
 
 
 def proactive_enabled() -> bool:
@@ -416,10 +418,7 @@ def proactive_enabled() -> bool:
 
 def set_proactive_enabled(enabled: bool) -> dict[str, Any]:
     """Persist the proactive-speech toggle and echo the new value back."""
-    state = load_state()
-    state["proactive_enabled"] = bool(enabled)
-    save_state(state)
-    return {"ok": True, "proactive_enabled": bool(enabled)}
+    return _persist_toggle("proactive_enabled", enabled)
 
 
 def is_muted() -> bool:

@@ -272,6 +272,15 @@ class ESP32Connection:
                 future.set_exception(ConnectionError("ESP32 disconnected"))
         self._pending.clear()
 
+    async def send_json(self, payload: dict) -> None:
+        """Send one JSON object to the device (public for message handlers)."""
+        await self._ws_send(json.dumps(payload, separators=(",", ":")))
+
+    async def close(self) -> None:
+        """Hard-close the underlying WebSocket (used to reject a device)."""
+        await self._ws.close()
+        self._pending.clear()
+
 
 class ESP32Manager:
     """Manages ESP32 device connections (currently a single device)."""
@@ -373,6 +382,85 @@ class ESP32Manager:
         logger.warning("ESP32 auth rejected")
         return websockets.http11.Response(401, "Unauthorized", websockets.datastructures.Headers())
 
+    async def _handle_hello(self, connection: ESP32Connection, data: dict[str, Any]) -> None:
+        """Negotiate an incoming device: reject non-MCP, register the connection."""
+        if not data.get("features", {}).get("mcp"):
+            logger.warning("ESP32 does not support MCP, rejecting")
+            await connection.close()
+            return
+
+        # Capture the WS protocol version so callers can decide wire-format
+        # compatibility (raw Opus = v1 only).
+        raw_version = data.get("version", 1)
+        try:
+            connection.protocol_version = int(raw_version)
+        except (TypeError, ValueError):
+            connection.protocol_version = 1
+        if connection.protocol_version != 1:
+            logger.warning(
+                "ESP32 negotiated WebSocket protocol version=%s; the gateway emits raw "
+                "Opus binary frames matching v1 only. TTS calls (say) will be blocked "
+                "at the orchestrator until v2/v3 BinaryProtocol header wrapping is "
+                "implemented",
+                connection.protocol_version,
+            )
+
+        await connection.send_json(
+            HelloResponse(session_id=connection.session_id).model_dump()
+        )
+
+        async with self._lock:
+            if self._connection and self._connection.connected:
+                logger.warning("Replacing existing ESP32 connection")
+                self._connection.disconnect()
+            self._connection = connection
+
+        # Init runs detached so the read loop keeps pumping its responses.
+        task = asyncio.create_task(self._init_device(connection, connection.device_id))
+        self._init_tasks.append(task)
+        task.add_done_callback(
+            lambda t: self._init_tasks.remove(t) if t in self._init_tasks else None
+        )
+
+    async def _handle_mcp(self, connection: ESP32Connection, data: dict[str, Any]) -> None:
+        """Deliver an MCP response payload to its pending future."""
+        connection.handle_response(data.get("payload", {}))
+
+    async def _handle_avatar_set_loaded(self, connection: ESP32Connection, data: dict[str, Any]) -> None:
+        """Device reports the result of a load_avatar_set fetch."""
+        connection.handle_avatar_set_loaded(data)
+
+    async def _handle_stackchan_event(self, connection: ESP32Connection, data: dict[str, Any]) -> None:
+        """Forward a device-raised event to the external subscriber hook."""
+        await self._emit_stackchan_event(data)
+
+    async def _handle_listen(self, connection: ESP32Connection, data: dict[str, Any]) -> None:
+        """Device-driven listen start/stop (wake word, button, LCD touch).
+
+        MCP-driven listen() opens its own recording slot, so we only act when
+        the device initiated AND a hook URL is configured to receive the result.
+        """
+        await self._handle_device_listen(data, connection.session_id)
+
+    # Message-type dispatch for the device read loop. Each entry maps one
+    # ``type`` field to its handler; unknown types are logged and skipped.
+    _MESSAGE_HANDLERS: dict[str, Callable[..., Awaitable[None]]] = {
+        "hello": _handle_hello,
+        "mcp": _handle_mcp,
+        "avatar_set_loaded": _handle_avatar_set_loaded,
+        "stackchan-event": _handle_stackchan_event,
+        "listen": _handle_listen,
+    }
+
+    async def _dispatch_message(self, connection: ESP32Connection, data: dict) -> None:
+        """Route one typed JSON message from the ESP32 to its handler."""
+        msg_type = data.get("type", "")
+        handler = self._MESSAGE_HANDLERS.get(msg_type)
+        if handler is None:
+            logger.debug("ESP32 message type=%s (ignored)", msg_type)
+            return
+        await handler(self, connection, data)
+
     async def _handler(self, ws: ServerConnection) -> None:
         """Handle an incoming ESP32 WebSocket connection.
 
@@ -401,62 +489,7 @@ class ESP32Manager:
                     logger.warning("Invalid JSON from ESP32: %s", str(message)[:100])
                     continue
 
-                msg_type = data.get("type", "")
-
-                if msg_type == "hello":
-                    if not data.get("features", {}).get("mcp"):
-                        logger.warning("ESP32 does not support MCP, rejecting")
-                        await ws.close()
-                        return
-
-                    # Capture the WS protocol version so callers can decide
-                    # wire-format compatibility (raw Opus = v1 only).
-                    raw_version = data.get("version", 1)
-                    try:
-                        connection.protocol_version = int(raw_version)
-                    except (TypeError, ValueError):
-                        connection.protocol_version = 1
-                    if connection.protocol_version != 1:
-                        logger.warning(
-                            "ESP32 negotiated WebSocket protocol version=%s; the gateway emits raw "
-                            "Opus binary frames matching v1 only. TTS calls (say) will be blocked "
-                            "at the orchestrator until v2/v3 BinaryProtocol header wrapping is "
-                            "implemented",
-                            connection.protocol_version,
-                        )
-
-                    await ws.send(HelloResponse(session_id=session_id).model_dump_json())
-
-                    async with self._lock:
-                        if self._connection and self._connection.connected:
-                            logger.warning("Replacing existing ESP32 connection")
-                            self._connection.disconnect()
-                        self._connection = connection
-
-                    # Init runs detached so the read loop keeps pumping its responses.
-                    task = asyncio.create_task(self._init_device(connection, device_id))
-                    self._init_tasks.append(task)
-                    task.add_done_callback(lambda t: self._init_tasks.remove(t) if t in self._init_tasks else None)
-
-                elif msg_type == "mcp":
-                    connection.handle_response(data.get("payload", {}))
-
-                elif msg_type == "avatar_set_loaded":
-                    # Device reports the result of a load_avatar_set fetch.
-                    connection.handle_avatar_set_loaded(data)
-
-                elif msg_type == "stackchan-event":
-                    await self._emit_stackchan_event(data)
-
-                elif msg_type == "listen":
-                    # Device-driven listen start/stop (wake word, button, LCD
-                    # touch). MCP-driven listen() opens its own recording slot,
-                    # so we only act when the device initiated AND a hook URL
-                    # is configured to receive the result.
-                    await self._handle_device_listen(data, session_id)
-
-                else:
-                    logger.debug("ESP32 message type=%s (ignored)", msg_type)
+                await self._dispatch_message(connection, data)
 
         except websockets.exceptions.ConnectionClosed:
             logger.info("ESP32 disconnected: device=%s", device_id)
