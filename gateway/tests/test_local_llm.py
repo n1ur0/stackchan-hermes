@@ -327,7 +327,7 @@ async def test_ask_local_strips_think_tags(monkeypatch, aiohttp_unused_port):
             {
                 "message": {
                     "role": "assistant",
-                    "content": " thinking some long thinking...\nwith newline response yes, Thursday.",
+                    "content": " thinking some long thinking...\nwith newline responseyes, Thursday.",
                 }
             }
         )
