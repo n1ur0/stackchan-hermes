@@ -33,6 +33,7 @@ import os
 import tempfile
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -176,36 +177,28 @@ def _state_path() -> Path:
     ).expanduser()
 
 
-def _clamp_volume(volume: Any) -> int:
+def _clamp_int(value: Any, lo: int, hi: int, default: int) -> int:
     try:
-        value = int(volume)
+        parsed = int(value)
     except (TypeError, ValueError):
-        return DEFAULT_VOLUME
-    return min(max(value, 0), 100)
+        return default
+    return min(max(parsed, lo), hi)
+
+
+def _clamp_volume(volume: Any) -> int:
+    return _clamp_int(volume, 0, 100, DEFAULT_VOLUME)
 
 
 def _clamp_mic_gain(gain: Any) -> int:
-    try:
-        value = int(gain)
-    except (TypeError, ValueError):
-        return DEFAULT_MIC_GAIN
-    return min(max(value, 0), MAX_MIC_GAIN)
+    return _clamp_int(gain, 0, MAX_MIC_GAIN, DEFAULT_MIC_GAIN)
 
 
 def _clamp_brightness(value: Any) -> int:
-    try:
-        v = int(value)
-    except (TypeError, ValueError):
-        return DEFAULT_BRIGHTNESS
-    return min(max(v, 0), 100)
+    return _clamp_int(value, 0, 100, DEFAULT_BRIGHTNESS)
 
 
 def _clamp_rgb(value: Any) -> int:
-    try:
-        v = int(value)
-    except (TypeError, ValueError):
-        return 0
-    return min(max(v, 0), 255)
+    return _clamp_int(value, 0, 255, 0)
 
 
 def _clamp_color(raw: Any, default: dict[str, Any]) -> dict[str, int]:
@@ -218,11 +211,7 @@ def _clamp_color(raw: Any, default: dict[str, Any]) -> dict[str, int]:
 
 
 def _clamp_led_brightness(value: Any) -> int:
-    try:
-        v = int(value)
-    except (TypeError, ValueError):
-        return DEFAULT_LED["brightness"]
-    return min(max(v, 0), 100)
+    return _clamp_int(value, 0, 100, DEFAULT_LED["brightness"])
 
 
 def _scale_rgb(r: int, g: int, b: int, brightness: int) -> dict[str, int]:
@@ -262,19 +251,11 @@ def _normalize_led(raw: Any) -> dict[str, Any]:
 
 
 def _clamp_head_yaw(yaw: Any) -> int:
-    try:
-        value = int(yaw)
-    except (TypeError, ValueError):
-        return 0
-    return min(max(value, MIN_HEAD_YAW), MAX_HEAD_YAW)
+    return _clamp_int(yaw, MIN_HEAD_YAW, MAX_HEAD_YAW, 0)
 
 
 def _clamp_head_pitch(pitch: Any) -> int:
-    try:
-        value = int(pitch)
-    except (TypeError, ValueError):
-        return MIN_HEAD_PITCH
-    return min(max(value, MIN_HEAD_PITCH), MAX_HEAD_PITCH)
+    return _clamp_int(pitch, MIN_HEAD_PITCH, MAX_HEAD_PITCH, MIN_HEAD_PITCH)
 
 
 def _default_multiturn() -> bool:
@@ -451,15 +432,44 @@ def is_muted() -> bool:
     return bool(load_state()["muted"])
 
 
-async def _send_volume(gateway: "Gateway", volume: int) -> bool:
-    """Push a volume level to the device. True on success."""
-    result, error = await gateway.esp32.call_tool(
-        _SET_VOLUME_TOOL, {"volume": volume}
-    )
+async def _send_scalar(gateway: "Gateway", tool: str, args: dict[str, Any]) -> bool:
+    """Call a scalar-setting device tool by name; True on success."""
+    _result, error = await gateway.esp32.call_tool(tool, args)
     if error:
-        logger.warning("control: set_volume failed: %s", error)
+        logger.warning("control: %s failed: %s", tool.rsplit(".", 1)[-1], error)
         return False
     return True
+
+
+async def _reapply(
+    gateway: "Gateway",
+    label: str,
+    send: Callable[[], Awaitable[bool]],
+) -> None:
+    """Wait a beat, then re-apply a persisted setting after a (re)connect.
+
+    The codec init can swallow a setting issued the instant the device
+    appears, so this waits and retries once. Errors degrade to WARN —
+    a failed restore must not take anything down.
+    """
+    await asyncio.sleep(_APPLY_VOLUME_DELAY_S)
+    for attempt in range(_APPLY_VOLUME_RETRIES + 1):
+        if not gateway.esp32.device_connected:
+            logger.info("control: device gone before %s re-apply", label)
+            return
+        try:
+            if await send():
+                logger.info("control: re-applied %s", label)
+                return
+        except Exception:
+            logger.exception("control: %s re-apply raised", label)
+        if attempt < _APPLY_VOLUME_RETRIES:
+            await asyncio.sleep(_APPLY_VOLUME_DELAY_S)
+    logger.warning("control: %s re-apply gave up after retries", label)
+
+
+async def _send_volume(gateway: "Gateway", volume: int) -> bool:
+    return await _send_scalar(gateway, _SET_VOLUME_TOOL, {"volume": volume})
 
 
 async def set_volume(gateway: "Gateway", volume: Any) -> dict[str, Any]:
@@ -510,38 +520,15 @@ async def apply_persisted_volume(gateway: "Gateway") -> None:
     """Re-apply the saved volume after a device (re)connects.
 
     The firmware does not persist the user's chosen volume, so the
-    gateway restores it on connect. The codec init can drop a
-    set_volume issued the instant the device appears, so this waits a
-    beat and retries once. A muted state restores to 0. Errors are
-    swallowed to WARN — a failed restore must not take anything down.
+    gateway restores it on connect. A muted state restores to 0.
     """
     state = load_state()
     target = 0 if state["muted"] else state["volume"]
-    await asyncio.sleep(_APPLY_VOLUME_DELAY_S)
-    for attempt in range(_APPLY_VOLUME_RETRIES + 1):
-        if not gateway.esp32.device_connected:
-            logger.info("control: device gone before volume re-apply")
-            return
-        try:
-            if await _send_volume(gateway, target):
-                logger.info("control: re-applied volume=%d (muted=%s)", target, state["muted"])
-                return
-        except Exception:
-            logger.exception("control: volume re-apply raised")
-        if attempt < _APPLY_VOLUME_RETRIES:
-            await asyncio.sleep(_APPLY_VOLUME_DELAY_S)
-    logger.warning("control: volume re-apply gave up after retries")
+    await _reapply(gateway, "volume", lambda: _send_volume(gateway, target))
 
 
 async def _send_mic_gain(gateway: "Gateway", gain: int) -> bool:
-    """Push a mic gain level to the device. True on success."""
-    result, error = await gateway.esp32.call_tool(
-        _SET_MIC_GAIN_TOOL, {"gain": gain}
-    )
-    if error:
-        logger.warning("control: set_mic_gain failed: %s", error)
-        return False
-    return True
+    return await _send_scalar(gateway, _SET_MIC_GAIN_TOOL, {"gain": gain})
 
 
 async def set_mic_gain(gateway: "Gateway", gain: Any) -> dict[str, Any]:
@@ -560,42 +547,13 @@ async def set_mic_gain(gateway: "Gateway", gain: Any) -> dict[str, Any]:
 
 
 async def apply_persisted_mic_gain(gateway: "Gateway") -> None:
-    """Re-apply the saved mic gain after a device (re)connects.
-
-    The firmware does not persist the user's chosen mic gain, so the
-    gateway restores it on connect. The codec init can drop a
-    set_mic_gain issued the instant the device appears, so this waits a
-    beat and retries once. Errors are swallowed to WARN — a failed
-    restore must not take anything down. Mirrors
-    :func:`apply_persisted_volume`.
-    """
-    state = load_state()
-    target = state["mic_gain"]
-    await asyncio.sleep(_APPLY_VOLUME_DELAY_S)
-    for attempt in range(_APPLY_VOLUME_RETRIES + 1):
-        if not gateway.esp32.device_connected:
-            logger.info("control: device gone before mic_gain re-apply")
-            return
-        try:
-            if await _send_mic_gain(gateway, target):
-                logger.info("control: re-applied mic_gain=%d", target)
-                return
-        except Exception:
-            logger.exception("control: mic_gain re-apply raised")
-        if attempt < _APPLY_VOLUME_RETRIES:
-            await asyncio.sleep(_APPLY_VOLUME_DELAY_S)
-    logger.warning("control: mic_gain re-apply gave up after retries")
+    """Re-apply the saved mic gain after a device (re)connects."""
+    target = load_state()["mic_gain"]
+    await _reapply(gateway, "mic_gain", lambda: _send_mic_gain(gateway, target))
 
 
 async def _send_brightness(gateway: "Gateway", value: int) -> bool:
-    """Push a screen brightness to the device. True on success."""
-    _result, error = await gateway.esp32.call_tool(
-        _SET_BRIGHTNESS_TOOL, {"brightness": value}
-    )
-    if error:
-        logger.warning("control: set_brightness failed: %s", error)
-        return False
-    return True
+    return await _send_scalar(gateway, _SET_BRIGHTNESS_TOOL, {"brightness": value})
 
 
 async def set_brightness(gateway: "Gateway", value: Any) -> dict[str, Any]:
@@ -619,26 +577,10 @@ async def apply_persisted_brightness(gateway: "Gateway") -> None:
     """Re-assert the saved brightness after a device (re)connects.
 
     Harmless even though the firmware restores its own NVS value on
-    boot: the two are kept in sync (every set_brightness saves NVS), so
-    this just confirms the user's choice. Mirrors
-    :func:`apply_persisted_volume`; errors degrade to WARN.
+    boot: the two are kept in sync (every set_brightness saves NVS).
     """
-    state = load_state()
-    target = state["brightness"]
-    await asyncio.sleep(_APPLY_VOLUME_DELAY_S)
-    for attempt in range(_APPLY_VOLUME_RETRIES + 1):
-        if not gateway.esp32.device_connected:
-            logger.info("control: device gone before brightness re-apply")
-            return
-        try:
-            if await _send_brightness(gateway, target):
-                logger.info("control: re-applied brightness=%d", target)
-                return
-        except Exception:
-            logger.exception("control: brightness re-apply raised")
-        if attempt < _APPLY_VOLUME_RETRIES:
-            await asyncio.sleep(_APPLY_VOLUME_DELAY_S)
-    logger.warning("control: brightness re-apply gave up after retries")
+    target = load_state()["brightness"]
+    await _reapply(gateway, "brightness", lambda: _send_brightness(gateway, target))
 
 
 async def _send_led_color(gateway: "Gateway", r: int, g: int, b: int) -> bool:
@@ -781,29 +723,16 @@ async def apply_persisted_led(gateway: "Gateway") -> None:
     """Re-apply the saved idle LED colour after a device (re)connects.
 
     The firmware boots with LEDs off, so only an "on" idle state needs
-    re-asserting. Mirrors :func:`apply_persisted_volume`; errors degrade
-    to WARN.
+    re-asserting.
     """
     idle = load_state()["led"]["idle"]
     if not idle["on"]:
         return
-    await asyncio.sleep(_APPLY_VOLUME_DELAY_S)
-    for attempt in range(_APPLY_VOLUME_RETRIES + 1):
-        if not gateway.esp32.device_connected:
-            logger.info("control: device gone before LED re-apply")
-            return
-        try:
-            if await _send_led_color(gateway, idle["r"], idle["g"], idle["b"]):
-                logger.info(
-                    "control: re-applied idle LED rgb=(%d,%d,%d)",
-                    idle["r"], idle["g"], idle["b"],
-                )
-                return
-        except Exception:
-            logger.exception("control: LED re-apply raised")
-        if attempt < _APPLY_VOLUME_RETRIES:
-            await asyncio.sleep(_APPLY_VOLUME_DELAY_S)
-    logger.warning("control: LED re-apply gave up after retries")
+    await _reapply(
+        gateway,
+        "idle LED",
+        lambda: _send_led_color(gateway, idle["r"], idle["g"], idle["b"]),
+    )
 
 
 async def restore_idle_led(gateway: "Gateway") -> None:
