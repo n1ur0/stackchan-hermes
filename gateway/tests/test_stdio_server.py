@@ -46,42 +46,101 @@ async def test_list_tools_includes_get_head_angles():
     assert "get_head_angles" in tool_names
 
 
-@pytest.mark.asyncio
-async def test_get_head_angles_relays_to_esp32(monkeypatch):
-    """get_head_angles maps to the ESP32 self.robot.get_head_angles tool."""
-    calls = []
+def _make_relay_gateway(response_text: str = "{}"):
+    """Wire a connected FakeESP32/FakeGateway pair; records tool calls.
+
+    The returned ``calls`` list records every ``call_tool(name, args)`` the
+    handler makes, and the fake returns ``response_text`` as MCP text JSON.
+    """
+
+    calls: list[tuple[str, dict]] = []
 
     class FakeESP32:
         device_connected = True
 
         async def call_tool(self, name, arguments):
             calls.append((name, arguments))
-            return {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": json.dumps({"yaw": 12, "pitch": -3}),
-                    }
-                ],
-            }, None
+            return {"content": [{"type": "text", "text": response_text}]}, None
 
     class FakeGateway:
         esp32 = FakeESP32()
 
-    import stackchan_mcp.stdio_server as stdio_server
+    return calls, FakeGateway()
 
-    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "expected_call", "response_text", "assert_payload"),
+    [
+        (
+            "get_head_angles",
+            {},
+            ("self.robot.get_head_angles", {}),
+            json.dumps({"yaw": 12, "pitch": -3}),
+            {"yaw": 12, "pitch": -3},
+        ),
+        (
+            "set_neutral_pose",
+            {"yaw": -15, "pitch": 50},
+            ("self.robot.set_neutral_pose", {"yaw": -15, "pitch": 50}),
+            json.dumps({"ok": True}),
+            None,
+        ),
+        (
+            "set_mouth_sequence",
+            {
+                "steps": [
+                    {"shape": "open", "duration_ms": 80},
+                    {"shape": "closed", "duration_ms": 80},
+                ]
+            },
+            ("self.display.set_mouth_sequence", None),  # args asserted separately
+            json.dumps({"ok": True, "queued_steps": 2, "estimated_duration_ms": 160}),
+            None,
+        ),
+        (
+            "set_status_text",
+            {"text": "Thinking..."},
+            ("self.display.set_status_text", {"text": "Thinking..."}),
+            "{}",
+            None,
+        ),
+    ],
+    ids=[
+        "get_head_angles_relays_to_esp32",
+        "set_neutral_pose_relays_to_esp32",
+        "set_mouth_sequence_serialises_steps_to_json",
+        "set_status_text_relays_to_device",
+    ],
+)
+async def test_device_tool_relays(
+    monkeypatch, tool_name, arguments, expected_call, response_text, assert_payload
+):
+    """Every device-backed tool maps to its ESP32 ``self.*`` counterpart."""
+    calls, gateway = _make_relay_gateway(response_text)
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: gateway)
     server = create_server()
 
     result = await server.request_handlers[CallToolRequest](
         CallToolRequest(
             method="tools/call",
-            params={"name": "get_head_angles", "arguments": {}},
+            params={"name": tool_name, "arguments": arguments},  # type: ignore[arg-type]  # noqa: E501
         )
     )
 
-    assert calls == [("self.robot.get_head_angles", {})]
-    assert json.loads(result.root.content[0].text) == {"yaw": 12, "pitch": -3}
+    assert len(calls) == 1
+    if expected_call[1] is not None:
+        assert calls[0] == expected_call
+    else:
+        # set_mouth_sequence: array flattens to a JSON string so the ESP32
+        # Property type system (string/int/bool) can carry it.
+        name, call_args = calls[0]
+        assert name == expected_call[0]
+        assert set(call_args.keys()) == {"steps_json"}
+        assert json.loads(call_args["steps_json"]) == arguments["steps"]
+
+    if assert_payload is not None:
+        assert json.loads(result.root.content[0].text) == assert_payload
 
 
 @pytest.mark.asyncio
@@ -104,42 +163,6 @@ async def test_list_tools_includes_set_neutral_pose():
     assert props["pitch"]["maximum"] == 85
     assert set(tool.inputSchema["required"]) == {"yaw", "pitch"}
 
-
-@pytest.mark.asyncio
-async def test_set_neutral_pose_relays_to_esp32(monkeypatch):
-    """set_neutral_pose maps to the ESP32 self.robot.set_neutral_pose tool."""
-    calls = []
-
-    class FakeESP32:
-        device_connected = True
-
-        async def call_tool(self, name, arguments):
-            calls.append((name, arguments))
-            return {
-                "content": [
-                    {"type": "text", "text": json.dumps({"ok": True})}
-                ],
-            }, None
-
-    class FakeGateway:
-        esp32 = FakeESP32()
-
-    import stackchan_mcp.stdio_server as stdio_server
-
-    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
-    server = create_server()
-
-    await server.request_handlers[CallToolRequest](
-        CallToolRequest(
-            method="tools/call",
-            params={
-                "name": "set_neutral_pose",
-                "arguments": {"yaw": -15, "pitch": 50},
-            },
-        )
-    )
-
-    assert calls == [("self.robot.set_neutral_pose", {"yaw": -15, "pitch": 50})]
 
 
 @pytest.mark.asyncio
@@ -399,57 +422,6 @@ async def test_say_returns_error_json_when_device_disconnects_mid_stream(
     msg = payload["error"].lower()
     assert "disconnect" in msg or "frame" in msg
 
-
-@pytest.mark.asyncio
-async def test_set_mouth_sequence_relays_steps_as_json_string(monkeypatch):
-    """set_mouth_sequence serialises steps to JSON for the firmware.
-
-    The ESP32 MCP Property type system only supports string/integer/boolean,
-    so the gateway flattens the steps array to a JSON string under
-    `steps_json` before forwarding to self.display.set_mouth_sequence.
-    """
-    calls = []
-
-    class FakeESP32:
-        device_connected = True
-
-        async def call_tool(self, name, arguments):
-            calls.append((name, arguments))
-            return {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": json.dumps(
-                            {"ok": True, "queued_steps": 2, "estimated_duration_ms": 160}
-                        ),
-                    }
-                ],
-            }, None
-
-    class FakeGateway:
-        esp32 = FakeESP32()
-
-    import stackchan_mcp.stdio_server as stdio_server
-
-    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
-    server = create_server()
-
-    steps = [
-        {"shape": "open", "duration_ms": 80},
-        {"shape": "closed", "duration_ms": 80},
-    ]
-    await server.request_handlers[CallToolRequest](
-        CallToolRequest(
-            method="tools/call",
-            params={"name": "set_mouth_sequence", "arguments": {"steps": steps}},
-        )
-    )
-
-    assert len(calls) == 1
-    name, arguments = calls[0]
-    assert name == "self.display.set_mouth_sequence"
-    assert set(arguments.keys()) == {"steps_json"}
-    assert json.loads(arguments["steps_json"]) == steps
 
 
 # ---------------------------------------------------------------------------
@@ -895,28 +867,6 @@ async def test_list_tools_includes_set_status_text():
     assert tool is not None, "set_status_text tool should be registered"
     assert tool.inputSchema["properties"]["text"]["type"] == "string"
     assert tool.inputSchema["required"] == ["text"]
-
-
-@pytest.mark.asyncio
-async def test_set_status_text_relays_to_device():
-    """set_status_text maps to self.display.set_status_text."""
-    calls = []
-
-    class FakeESP32:
-        device_connected = True
-
-        async def call_tool(self, name, arguments):
-            calls.append((name, arguments))
-            return {"content": [{"type": "text", "text": "{}"}]}, None
-
-    class FakeGateway:
-        esp32 = FakeESP32()
-
-    content = await stdio_server._dispatch_mcp_tool(
-        "set_status_text", {"text": "Thinking..."}, FakeGateway()
-    )
-    assert calls == [("self.display.set_status_text", {"text": "Thinking..."})]
-    assert content  # non-empty TextContent list
 
 
 @pytest.mark.asyncio
