@@ -84,9 +84,7 @@ logger = logging.getLogger(__name__)
 #: the proactive speaker to react to meaningful transitions (e.g. a
 #: returning resident or a morning wake), keeping observation mechanical
 #: in the gateway and the wording in Hermes.
-StateChangeCb = Callable[
-    ["PresenceState", "PresenceState"], Awaitable[None] | None
-]
+StateChangeCb = Callable[["PresenceState", "PresenceState"], Awaitable[None] | None]
 
 #: Persisted threshold file. Overridable for tests via the env var.
 DEFAULT_STATE_PATH = "~/.stackchan/presence_state.json"
@@ -276,7 +274,8 @@ def save_config(config: dict[str, Any]) -> None:
     path = _state_path()
     payload = {
         "absent_after_s": _clamp_absent_after(config.get("absent_after_s")),
-        "sleep_window": _valid_window(config.get("sleep_window")) or DEFAULT_SLEEP_WINDOW,
+        "sleep_window": _valid_window(config.get("sleep_window"))
+        or DEFAULT_SLEEP_WINDOW,
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -652,9 +651,7 @@ class PresenceMonitor:
             "last_seen_s_ago": self._last_seen_s_ago(),
             # object_raw augmentation (lets us tune margins from the log).
             "obj_baseline": (
-                round(self._obj_baseline, 1)
-                if self._obj_baseline is not None
-                else None
+                round(self._obj_baseline, 1) if self._obj_baseline is not None else None
             ),
             "obj_armed": self._obj_armed,
             "static_present": self._last_static_present,

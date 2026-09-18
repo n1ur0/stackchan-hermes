@@ -113,6 +113,7 @@ class SpeakConfig:
         default_factory=lambda: Path(DEFAULT_STATE_PATH).expanduser()
     )
 
+
 #: M5Stack-recommended servo operating range (matches the move_head
 #: MCP tool validation in stdio_server.py).
 YAW_MIN, YAW_MAX = -90, 90
@@ -154,9 +155,7 @@ def is_quiet(now: _dt.time, quiet: tuple[_dt.time, _dt.time] | None) -> bool:
     return now >= start or now < end
 
 
-def compute_delay_s(
-    interval_min: float, jitter: float, rng: random.Random
-) -> float:
+def compute_delay_s(interval_min: float, jitter: float, rng: random.Random) -> float:
     """Next sleep in seconds: interval ± jitter, never below 10 s."""
     factor = rng.uniform(1.0 - jitter, 1.0 + jitter)
     return max(10.0, interval_min * 60.0 * factor)
@@ -279,11 +278,11 @@ class HeartbeatRunner:
             jitter = DEFAULT_JITTER
         jitter = min(max(jitter, 0.0), 0.9)
 
-        quiet = parse_quiet_hours(
-            os.getenv("STACKCHAN_HEARTBEAT_QUIET", DEFAULT_QUIET)
-        )
+        quiet = parse_quiet_hours(os.getenv("STACKCHAN_HEARTBEAT_QUIET", DEFAULT_QUIET))
 
-        gestures = os.getenv("STACKCHAN_HEARTBEAT_GESTURES", "1").strip().lower() not in (
+        gestures = os.getenv(
+            "STACKCHAN_HEARTBEAT_GESTURES", "1"
+        ).strip().lower() not in (
             "0",
             "false",
             "no",

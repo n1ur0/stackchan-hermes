@@ -37,7 +37,7 @@ import logging
 import os
 from typing import Any
 
-import aiohttp
+from .http import post_json
 
 logger = logging.getLogger(__name__)
 
@@ -80,18 +80,15 @@ async def _search_tavily(query: str, max_results: int) -> dict[str, Any]:
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
     }
-    timeout = aiohttp.ClientTimeout(total=SEARCH_TIMEOUT_S)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(
-            f"{base_url}/search", json=payload, headers=headers
-        ) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                logger.warning(
-                    "web_search: Tavily status=%d body=%s", resp.status, body[:300]
-                )
-                raise RuntimeError(f"Tavily returned status={resp.status}")
-            data = await resp.json()
+    data = await post_json(
+        f"{base_url}/search",
+        payload,
+        name="Tavily",
+        timeout_s=SEARCH_TIMEOUT_S,
+        headers=headers,
+        body_snippet=300,
+        log_warning=True,
+    )
 
     results = [
         {

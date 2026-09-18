@@ -47,7 +47,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 import os
 import secrets
@@ -56,6 +55,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, AsyncIterator
 
 from aiohttp import web
+
+from .http import json_error
 
 if TYPE_CHECKING:
     from .gateway import Gateway
@@ -108,11 +109,7 @@ async def handle_capture(request: web.Request) -> web.Response:
         request.headers.get("Authorization", ""), expected_token
     ):
         logger.warning("Capture upload auth rejected")
-        return web.Response(
-            text='{"error": "Unauthorized"}',
-            status=401,
-            content_type="application/json",
-        )
+        return json_error("Unauthorized", status=401)
 
     # Per-route body cap. The application-wide client_max_size is
     # disabled because /pcm streams arbitrary-length audio, so
@@ -125,13 +122,7 @@ async def handle_capture(request: web.Request) -> web.Response:
             "Capture upload rejected: Content-Length %d exceeds %d",
             content_length, CAPTURE_MAX_BYTES,
         )
-        return web.Response(
-            text=json.dumps(
-                {"error": f"Upload exceeds {CAPTURE_MAX_BYTES} bytes"}
-            ),
-            status=413,
-            content_type="application/json",
-        )
+        return json_error(f"Upload exceeds {CAPTURE_MAX_BYTES} bytes", status=413)
 
     os.makedirs(CAPTURE_DIR, exist_ok=True)
 
@@ -166,12 +157,8 @@ async def handle_capture(request: web.Request) -> web.Response:
                             "Capture upload truncated at %d bytes (cap %d)",
                             bytes_written, CAPTURE_MAX_BYTES,
                         )
-                        return web.Response(
-                            text=json.dumps(
-                                {"error": f"Upload exceeds {CAPTURE_MAX_BYTES} bytes"}
-                            ),
-                            status=413,
-                            content_type="application/json",
+                        return json_error(
+                            f"Upload exceeds {CAPTURE_MAX_BYTES} bytes", status=413
                         )
                     f.write(chunk)
 
@@ -183,18 +170,14 @@ async def handle_capture(request: web.Request) -> web.Response:
             file_size,
             question,
         )
-        result = json.dumps({
+        result = {
             "image_path": image_path,
             "size_bytes": file_size,
             "question": question,
-        })
-        return web.Response(text=result, content_type="application/json")
+        }
+        return web.json_response(result)
 
-    return web.Response(
-        text='{"error": "No image received"}',
-        status=400,
-        content_type="application/json",
-    )
+    return json_error("No image received", status=400)
 
 
 async def stage_avatar_set(
@@ -329,22 +312,14 @@ async def handle_pcm(request: web.Request) -> web.Response:
         request.headers.get("Authorization", ""), expected_token
     ):
         logger.warning("PCM upload auth rejected")
-        return web.Response(
-            text='{"error": "Unauthorized"}',
-            status=401,
-            content_type="application/json",
-        )
+        return json_error("Unauthorized", status=401)
 
     rate_header = request.headers.get("X-Sample-Rate", "")
     try:
         source_rate = int(rate_header)
     except (TypeError, ValueError):
-        return web.Response(
-            text=json.dumps(
-                {"error": f"Missing or invalid X-Sample-Rate header: {rate_header!r}"}
-            ),
-            status=400,
-            content_type="application/json",
+        return json_error(
+            f"Missing or invalid X-Sample-Rate header: {rate_header!r}", status=400
         )
     if source_rate <= 0:
         # Non-positive rates would crash resample_pcm16_linear with a
@@ -352,12 +327,8 @@ async def handle_pcm(request: web.Request) -> web.Response:
         # not translate) and never produce a valid frame anyway. Reject
         # at the boundary so the caller gets a clean 400 instead of
         # an internal server error trail.
-        return web.Response(
-            text=json.dumps(
-                {"error": f"X-Sample-Rate must be a positive integer: {rate_header!r}"}
-            ),
-            status=400,
-            content_type="application/json",
+        return json_error(
+            f"X-Sample-Rate must be a positive integer: {rate_header!r}", status=400
         )
 
     channels_header = request.headers.get("X-Channels", "1")
@@ -369,24 +340,14 @@ async def handle_pcm(request: web.Request) -> web.Response:
         # send_pcm_stream is configured for mono via DEVICE_CHANNELS. Multi-
         # channel sources would need downmix before they get here; rejecting
         # them up front is clearer than silently mixing.
-        return web.Response(
-            text=json.dumps(
-                {"error": f"Only mono PCM is supported, got channels={channels}"}
-            ),
-            status=400,
-            content_type="application/json",
-        )
+        return json_error(f"Only mono PCM is supported, got channels={channels}", status=400)
 
     message_id = request.headers.get("X-Message-Id", "")
     source_label = f"http_pcm:{message_id}" if message_id else "http_pcm"
 
     gateway = request.app[GATEWAY_KEY]
     if gateway is None:
-        return web.Response(
-            text='{"error": "Gateway not available"}',
-            status=503,
-            content_type="application/json",
-        )
+        return json_error("Gateway not available", status=503)
 
     # Lazy import: tts.send_pcm_stream pulls in opuslib, which is in the
     # ``[tts]`` extra. Capture-only deployments must keep working
@@ -395,15 +356,7 @@ async def handle_pcm(request: web.Request) -> web.Response:
     try:
         from .tts import send_pcm_stream
     except ImportError as exc:
-        return web.Response(
-            text=json.dumps(
-                {
-                    "error": f"PCM endpoint requires the [tts] extra: {exc}",
-                }
-            ),
-            status=500,
-            content_type="application/json",
-        )
+        return json_error(f"PCM endpoint requires the [tts] extra: {exc}", status=500)
 
     try:
         result = await send_pcm_stream(
@@ -418,13 +371,9 @@ async def handle_pcm(request: web.Request) -> web.Response:
         # to a clean HTTP error rather than letting the traceback leak.
         message = str(exc)
         status = 503 if "no esp32" in message.lower() else 500
-        return web.Response(
-            text=json.dumps({"error": message}),
-            status=status,
-            content_type="application/json",
-        )
+        return json_error(message, status=status)
 
-    return web.Response(text=json.dumps(result), content_type="application/json")
+    return web.json_response(result)
 
 
 def create_capture_app(

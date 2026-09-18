@@ -250,10 +250,14 @@ class ProactiveSpeaker:
             return None
         config = ProactiveConfig(
             cooldown_min=max(
-                0.0, _env_number("STACKCHAN_PROACTIVE_COOLDOWN_MIN", DEFAULT_COOLDOWN_MIN)
+                0.0,
+                _env_number("STACKCHAN_PROACTIVE_COOLDOWN_MIN", DEFAULT_COOLDOWN_MIN),
             ),
             max_per_day=max(
-                0, int(_env_number("STACKCHAN_PROACTIVE_MAX_PER_DAY", DEFAULT_MAX_PER_DAY))
+                0,
+                int(
+                    _env_number("STACKCHAN_PROACTIVE_MAX_PER_DAY", DEFAULT_MAX_PER_DAY)
+                ),
             ),
             refire_min=max(
                 0.0, _env_number("STACKCHAN_PROACTIVE_REFIRE_MIN", DEFAULT_REFIRE_MIN)
@@ -271,7 +275,8 @@ class ProactiveSpeaker:
                 "STACKCHAN_PROACTIVE_NIGHT_PRESET", DEFAULT_NIGHT_PRESET
             ).strip(),
             mode_switch_delay_s=max(
-                0.0, _env_number("STACKCHAN_PROACTIVE_MODE_DELAY_S", DEFAULT_MODE_DELAY_S)
+                0.0,
+                _env_number("STACKCHAN_PROACTIVE_MODE_DELAY_S", DEFAULT_MODE_DELAY_S),
             ),
             state_path=Path(
                 os.getenv("STACKCHAN_PROACTIVE_STATE", "") or DEFAULT_STATE_PATH
@@ -281,9 +286,7 @@ class ProactiveSpeaker:
 
     # ---- callback --------------------------------------------------
 
-    async def on_state_change(
-        self, old: PresenceState, new: PresenceState
-    ) -> None:
+    async def on_state_change(self, old: PresenceState, new: PresenceState) -> None:
         """Presence transition observer (see :data:`presence.StateChangeCb`).
 
         Runs the full guard gauntlet, then asks Hermes for the wording and
@@ -389,7 +392,11 @@ class ProactiveSpeaker:
         self, old: PresenceState, new: PresenceState
     ) -> _Transition | None:
         for t in _ALL_TRANSITIONS:
-            if t.key in self._config.enabled_transitions and t.src == old and t.dst == new:
+            if (
+                t.key in self._config.enabled_transitions
+                and t.src == old
+                and t.dst == new
+            ):
                 return t
         return None
 

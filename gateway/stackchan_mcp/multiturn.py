@@ -47,12 +47,12 @@ Environment variables (all opt-in / tunable):
 
 from __future__ import annotations
 
-import os
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from . import local_llm
+from .statefile import env_enabled, env_int
 
 #: Reply suffixes that invite a follow-up answer.
 _CONTINUE_SUFFIXES = ("?",)
@@ -68,15 +68,6 @@ DEFAULT_TTS_GUARD_MS = 1000
 DEFAULT_SESSION_WINDOW_S = 180
 
 
-def _env_positive_int(name: str, default: int) -> int:
-    """Parse a positive int env var, falling back to ``default``."""
-    try:
-        value = int(os.getenv(name, ""))
-    except (TypeError, ValueError):
-        return default
-    return value if value > 0 else default
-
-
 def is_enabled() -> bool:
     """True when multi-turn continuation is opted in via the env gate.
 
@@ -86,22 +77,19 @@ def is_enabled() -> bool:
     toggle's initial default (see ``control._default_multiturn``). Kept for
     that default and for tests.
     """
-    return os.getenv("STACKCHAN_MULTITURN", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    return env_enabled("STACKCHAN_MULTITURN")
 
 
 def max_turns() -> int:
     """Ceiling on consecutive auto-continuations in one conversation."""
-    return _env_positive_int("MAX_MULTITURN_TURNS", DEFAULT_MAX_TURNS)
+    return env_int("MAX_MULTITURN_TURNS", DEFAULT_MAX_TURNS, minimum=1)
 
 
 def session_timeout_s() -> float:
     """Seconds of inactivity after which a continuation gap is abandoned."""
-    return float(_env_positive_int("MULTITURN_SESSION_TIMEOUT_S", DEFAULT_SESSION_TIMEOUT_S))
+    return float(
+        env_int("MULTITURN_SESSION_TIMEOUT_S", DEFAULT_SESSION_TIMEOUT_S, minimum=1)
+    )
 
 
 def tts_guard_ms() -> int:
@@ -109,12 +97,7 @@ def tts_guard_ms() -> int:
 
     Zero is allowed (no guard); negative/invalid falls back to the default.
     """
-    raw = os.getenv("MULTITURN_TTS_GUARD_MS", "")
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return DEFAULT_TTS_GUARD_MS
-    return value if value >= 0 else DEFAULT_TTS_GUARD_MS
+    return env_int("MULTITURN_TTS_GUARD_MS", DEFAULT_TTS_GUARD_MS, minimum=0)
 
 
 def session_window_s() -> float:
@@ -125,12 +108,9 @@ def session_window_s() -> float:
     ``HERMES_SESSION_ID``, exactly as before. Negative/invalid falls back
     to the default.
     """
-    raw = os.getenv("HERMES_SESSION_WINDOW_S", "")
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return float(DEFAULT_SESSION_WINDOW_S)
-    return float(value) if value >= 0 else float(DEFAULT_SESSION_WINDOW_S)
+    return float(
+        env_int("HERMES_SESSION_WINDOW_S", DEFAULT_SESSION_WINDOW_S, minimum=0)
+    )
 
 
 def new_session_id(base: str) -> str:

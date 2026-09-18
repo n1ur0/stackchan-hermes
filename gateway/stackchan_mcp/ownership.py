@@ -7,9 +7,10 @@ import os
 import socket
 import sys
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, TypedDict
+
+from .statefile import utc_now_iso, write_temp_text
 
 LOCK_DIR = Path.home() / ".stackchan-mcp"
 LOCK_PATH = LOCK_DIR / "owner.lock"
@@ -33,10 +34,6 @@ class LockInfo(_BaseLockInfo, total=False):
 
 class OwnershipError(RuntimeError):
     """Raised when ownership cannot be acquired."""
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def generate_owner_id() -> str:
@@ -157,8 +154,7 @@ def read_lock(path: Path = LOCK_PATH) -> LockInfo | None:
 
 def _write_lock_atomic(info: LockInfo, path: Path = LOCK_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    tmp.write_text(json.dumps(info, indent=2), encoding="utf-8")
+    tmp = write_temp_text(path.parent, json.dumps(info, indent=2))
     try:
         # Link the complete temp file into place only if no owner file exists.
         # This keeps readers from seeing partial JSON and lets exactly one
@@ -211,7 +207,7 @@ def acquire_lock(
         info: LockInfo = {
             "owner_id": owner_id,
             "pid": os.getpid(),
-            "start_ts": _now_iso(),
+            "start_ts": utc_now_iso(),
             "host": socket.gethostname(),
         }
         if mode != "stdio":

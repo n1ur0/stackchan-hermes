@@ -41,18 +41,15 @@ from __future__ import annotations
 
 import asyncio
 import hmac
-import io
-import json
 import logging
 import os
 import re
 import time
 from typing import TYPE_CHECKING, Any
 
-import aiohttp
 from aiohttp import web
 
-from . import local_llm, multiturn
+from . import http, local_llm, multiturn
 
 if TYPE_CHECKING:
     from .gateway import Gateway
@@ -121,36 +118,9 @@ HERMES_TIMEOUT_S = 120.0
 #: its own.
 MAX_OGG_BYTES = 2 * 1024 * 1024
 
-#: Upper bound for the decoded PCM (decompression-bomb guard): 120 s of
-#: 16 kHz mono s16 audio. A malicious Ogg can expand far beyond its
-#: wire size; abort the decode loop once past this.
-MAX_PCM_BYTES = 120 * 16000 * 2
-
-
-def _ogg_opus_to_pcm16k(data: bytes) -> bytes:
-    """Decode an Ogg/Opus capture to 16 kHz mono s16 PCM via PyAV.
-
-    Raises ValueError if the decoded audio exceeds :data:`MAX_PCM_BYTES`.
-    """
-    import av
-    from av.audio.resampler import AudioResampler
-
-    out = bytearray()
-    resampler = AudioResampler(format="s16", layout="mono", rate=16000)
-    with av.open(io.BytesIO(data)) as container:
-        for frame in container.decode(audio=0):
-            for rframe in resampler.resample(frame):
-                out.extend(bytes(rframe.planes[0])[: rframe.samples * 2])
-            if len(out) > MAX_PCM_BYTES:
-                raise ValueError(
-                    f"decoded audio exceeds {MAX_PCM_BYTES} bytes PCM"
-                )
-        # Flush the resampler's internal FIFO.
-        for rframe in resampler.resample(None):
-            out.extend(bytes(rframe.planes[0])[: rframe.samples * 2])
-    if len(out) > MAX_PCM_BYTES:
-        raise ValueError(f"decoded audio exceeds {MAX_PCM_BYTES} bytes PCM")
-    return bytes(out)
+#: Ogg/Opus → 16 kHz PCM decoding lives in :mod:`stackchan_mcp.http`;
+#: this alias keeps the module-global patchable for tests/voice-turn.
+_ogg_opus_to_pcm16k = http.ogg_opus_to_pcm16k
 
 
 async def ask_hermes(
@@ -199,26 +169,17 @@ async def ask_hermes(
         ],
     }
 
-    timeout = aiohttp.ClientTimeout(total=HERMES_TIMEOUT_S)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(
-            f"{base_url}/v1/chat/completions", json=payload, headers=headers
-        ) as resp:
-            body = await resp.text()
-            if resp.status != 200:
-                # Log the upstream body server-side only; the HTTP
-                # caller gets a generic message (no provider internals).
-                logger.error(
-                    "Hermes API status=%d body=%s", resp.status, body[:500]
-                )
-                raise RuntimeError(
-                    f"Hermes API returned status={resp.status}"
-                )
-    data = json.loads(body)
+    data = await http.post_json(
+        f"{base_url}/v1/chat/completions",
+        payload,
+        name="Hermes API",
+        timeout_s=HERMES_TIMEOUT_S,
+        headers=headers,
+    )
     try:
         reply = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
-        logger.error("Hermes API response missing choices: %s", body[:500])
+        logger.error("Hermes API response missing choices: %s", str(data)[:500])
         raise RuntimeError("Hermes API response missing choices") from exc
     if not isinstance(reply, str) or not reply.strip():
         raise RuntimeError("Hermes API returned an empty reply")
