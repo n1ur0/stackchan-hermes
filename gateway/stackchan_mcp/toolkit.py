@@ -169,6 +169,28 @@ async def _list_notes(gateway: Any, _: dict[str, Any]) -> Any:
     return await asyncio.to_thread(notes.list_notes)
 
 
+async def _list_presence_motions(gateway: Any, _: dict[str, Any]) -> Any:
+    """Return the robot's presence-motion status catalog (client-facing)."""
+    choreo = getattr(gateway, "choreo", None)
+    if choreo is None:
+        return {"ok": False, "error": "choreographer not available"}
+    try:
+        return {"ok": True, "motions": choreo.list_motions()}
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"ok": False, "error": str(exc)}
+
+
+async def _play_presence_motion(gateway: Any, arguments: dict[str, Any]) -> Any:
+    """Start a named catalog motion now (continuous wave)."""
+    choreo = getattr(gateway, "choreo", None)
+    if choreo is None:
+        return {"ok": False, "error": "choreographer not available"}
+    try:
+        return await choreo.play(arguments.get("motion", ""))
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"ok": False, "error": str(exc)}
+
+
 HANDLERS: dict[str, Handler] = {
     "get_status": _get_status,
     "get_presence": _get_presence,
@@ -183,6 +205,8 @@ HANDLERS: dict[str, Handler] = {
     "write_note": _write_note,
     "read_note": _read_note,
     "list_notes": _list_notes,
+    "list_presence_motions": _list_presence_motions,
+    "play_presence_motion": _play_presence_motion,
 }
 
 
@@ -280,6 +304,8 @@ TOOLS: list[ToolDef] = [
     ToolDef('get_head_angles', "Get the robot's current head angles: yaw and pitch in degrees.", '{"type": "object", "properties": {}}', relay='self.robot.get_head_angles'),
     ToolDef('set_head_wave', "Start a continuous, fluid head-motion wave — Reachy-style 'alive' presence. The firmware renders it natively in its servo task (~50 Hz), so the head glides along a smooth sine instead of hopping between set-points. center_yaw / center_pitch = base pose in degrees; yaw_amp / pitch_amp = oscillation amplitude in degrees (0 holds that axis centered); yaw_freq_mhz / pitch_freq_mhz = frequency in milli-Hz (e.g. 500 = 0.5 Hz sway, 1300 = 1.3 Hz speech bob); yaw_phase_deg / pitch_phase_deg = phase offset in degrees (pitch phase defaults to 90 so pitch wave leads/sways relative to yaw). Stop with clear_head_wave; any explicit set_head_angles / touch / idle-settle also stops it.", '{"type": "object", "properties": {"center_yaw": {"type": "integer", "description": "Base yaw in degrees (-90..90)", "minimum": -90, "maximum": 90}, "center_pitch": {"type": "integer", "description": "Base pitch in degrees (0..88)", "minimum": 0, "maximum": 88}, "yaw_amp": {"type": "integer", "description": "Yaw amplitude in degrees (0..90)", "minimum": 0, "maximum": 90}, "yaw_freq_mhz": {"type": "integer", "description": "Yaw frequency in milli-Hz (0..5000)", "minimum": 0, "maximum": 5000}, "yaw_phase_deg": {"type": "integer", "description": "Yaw phase offset in degrees (0..360)", "minimum": 0, "maximum": 360}, "pitch_amp": {"type": "integer", "description": "Pitch amplitude in degrees (0..80)", "minimum": 0, "maximum": 80}, "pitch_freq_mhz": {"type": "integer", "description": "Pitch frequency in milli-Hz (0..5000)", "minimum": 0, "maximum": 5000}, "pitch_phase_deg": {"type": "integer", "description": "Pitch phase offset in degrees (0..360)", "minimum": 0, "maximum": 360}}, "required": ["center_yaw", "center_pitch", "yaw_amp", "yaw_freq_mhz"]}', relay='self.robot.set_head_wave'),
     ToolDef('clear_head_wave', "Stop a running continuous head wave and let the head settle back toward its current center. Safe to call even when no wave is active (no-op).", '{"type": "object", "properties": {}}', relay='self.robot.clear_head_wave'),
+    ToolDef('list_presence_motions', "Return the robot's presence-motion status catalog: the named continuous-wave movements (each with role, yaw/pitch amplitude + frequency, weight, and a plain-language description) that the choreographer picks from during voice turns. Use this to see what the robot can do and to choose a specific motion by name via play_presence_motion. Gateway-local; no device round-trip.", '{\"type\": \"object\", \"properties\": {}}', handler=HANDLERS['list_presence_motions']),
+    ToolDef('play_presence_motion', "Start a named catalog motion now as a continuous, fluid head wave. The name must come from list_presence_motions (e.g. 'mull-deep', 'chatter', 'sidle-in'). This drives the robot to a specific catalog entry directly (\"the one you do when you're curious\") rather than only the auto-picked random one. Returns the play outcome; unknown names return an error listing the valid motions. Use clear_head_wave to stop it.", '{\"type\": \"object\", \"properties\": {\"motion\": {\"type\": \"string\", \"description\": \"Name of a catalog motion from list_presence_motions.\"}}, \"required\": [\"motion\"]}', handler=HANDLERS['play_presence_motion']),
     ToolDef('set_neutral_pose', "Save the head's neutral (rest) pose — the angles it returns to between gestures. yaw: horizontal (-90 to 90), pitch: vertical (5 to 85, the M5Stack-recommended range). Unlike move_head this persists on the device across reboots (NVS), so the head rests at the chosen pose after a power cycle. The firmware applies its own wider hard clamp (pitch 0..88) on top.", '{"type": "object", "properties": {"yaw": {"type": "integer", "description": "Horizontal angle in degrees (-90 to 90)", "minimum": -90, "maximum": 90}, "pitch": {"type": "integer", "description": "Vertical angle in degrees (5 to 85, M5Stack-recommended operating range)", "minimum": 5, "maximum": 85}}, "required": ["yaw", "pitch"]}', relay='self.robot.set_neutral_pose'),
     ToolDef('gpio_test', 'Test GPIO6 pin by toggling HIGH/LOW 5 times. Check if servo reacts.', '{"type": "object", "properties": {}}', relay='self.robot.gpio_test'),
     ToolDef('uart_diag', 'Send raw servo bytes via UART and report write result.', '{"type": "object", "properties": {}}', relay='self.robot.uart_diag'),

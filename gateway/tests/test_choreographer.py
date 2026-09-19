@@ -6,9 +6,10 @@ import json
 from stackchan_mcp.choreographer import (
     Choreographer,
     _talking_steps,
-    YAW_SWAY_DEG,
-    YAW_SWING_DEG,
-    PITCH_NOD_DEG,
+    PRESENCE_MOTIONS,
+    ROLE_ENGAGE,
+    ROLE_TALK,
+    ROLE_THINK,
 )
 
 
@@ -42,6 +43,15 @@ class FakeGateway:
 
 def _calls_by(ch, name: str):
     return [a for n, a in ch._gateway.esp32.calls if n == name]
+
+
+def _role_amps(role: str) -> set[int]:
+    """The yaw amplitudes a chooser pick may legitimately carry for a role."""
+    return {m.yaw_amp for m in PRESENCE_MOTIONS if m.role == role}
+
+
+def _role_pitches(role: str) -> set[int]:
+    return {m.pitch_amp for m in PRESENCE_MOTIONS if m.role == role}
 
 
 async def _phase(ch, name: str, *args, **kwargs):
@@ -87,9 +97,10 @@ def test_engage_starts_gentle_sway():
     waves = _calls_by(ch, "self.robot.set_head_wave")
     assert len(waves) == 1
     w = waves[0]
-    # centered on home, gentle continuous sway — no discrete set-point hops.
+    # centered on home, a gentle continuous sway picked from the engage
+    # catalog — no discrete set-point hops.
     assert w["center_yaw"] == 0 and w["center_pitch"] == 40
-    assert w["yaw_amp"] == YAW_SWAY_DEG
+    assert w["yaw_amp"] in _role_amps(ROLE_ENGAGE)
     assert w["yaw_freq_mhz"] > 0
     assert _calls_by(ch, "self.robot.set_head_angles") == []
 
@@ -102,8 +113,8 @@ def test_thinking_starts_mulling_weave():
     waves = _calls_by(ch, "self.robot.set_head_wave")
     assert len(waves) == 1
     w = waves[0]
-    # weave amplitude scaled to StackChan's wide servo (YAW_SWING_DEG=16).
-    assert w["yaw_amp"] == YAW_SWING_DEG
+    # a mulling weave picked from the thinking catalog — no discrete hops.
+    assert w["yaw_amp"] in _role_amps(ROLE_THINK)
     assert w["center_yaw"] == 0 and w["center_pitch"] == 40
     assert w["yaw_freq_mhz"] > 0
     assert _calls_by(ch, "self.robot.set_head_angles") == []
@@ -120,9 +131,9 @@ def test_talk_dispatches_mouth_sequence_and_speech_wave():
     waves = _calls_by(ch, "self.robot.set_head_wave")
     assert len(waves) == 1
     w = waves[0]
-    # continuous sway + speech bob around home — no discrete nodes.
-    assert w["yaw_amp"] == YAW_SWAY_DEG
-    assert w["pitch_amp"] == PITCH_NOD_DEG
+    # a continuous conversational sway+bob picked from the talk catalog.
+    assert w["yaw_amp"] in _role_amps(ROLE_TALK)
+    assert w["pitch_amp"] in _role_pitches(ROLE_TALK)
     assert w["center_yaw"] == 0 and w["center_pitch"] == 40
     assert _calls_by(ch, "self.robot.set_head_angles") == []
 
@@ -133,7 +144,7 @@ def test_tool_step_reasserts_weave_for_any_tool():
         run_phase(ch, "tool_step", is_first=is_first)
         waves = _calls_by(ch, "self.robot.set_head_wave")
         assert len(waves) == 1
-        assert waves[0]["yaw_amp"] == YAW_SWING_DEG
+        assert waves[0]["yaw_amp"] in _role_amps(ROLE_THINK)
         assert _calls_by(ch, "self.robot.set_head_angles") == []
 
 
@@ -156,4 +167,53 @@ def test_unreadable_home_moves_nothing():
     run_phase(ch, "engage")
     # Face/blink still applied; no head motion without a home pose.
     assert _calls_by(ch, "self.robot.set_head_angles") == []
-    assert _calls_by(ch, "self.display.set_avatar")
+    assert _calls_by(ch, "self.display.set_avatar")  # face still set
+
+
+# ---- status catalog & chooser --------------------------------------
+
+
+def test_catalog_has_variants_per_role():
+    for role in (ROLE_ENGAGE, ROLE_THINK, ROLE_TALK):
+        variants = [
+            m for m in PRESENCE_MOTIONS
+            if m.role == role and m.name and m.yaw_amp > 0
+        ]
+        assert len(variants) > 1, f"{role} needs >1 catalog motion"
+
+
+def test_list_motions_returns_full_catalog():
+    ch = Choreographer(FakeGateway())
+    catalog = ch.list_motions()
+    # one descriptor per catalog entry, keyed for a client to choose by name.
+    assert len(catalog) == len(PRESENCE_MOTIONS)
+    assert {e["name"] for e in catalog} == {m.name for m in PRESENCE_MOTIONS}
+    assert all(e["role"] and e["description"] for e in catalog)
+
+
+def test_chooser_avoids_immediate_repeat_within_window():
+    ch = Choreographer(FakeGateway())
+    # Force many picks; within the repeat window the same name must never
+    # appear twice in a row, and consecutive picks alternate across variants.
+    names = [ch._pick(ROLE_THINK).name for _ in range(20)]
+    for a, b in zip(names, names[1:]):
+        assert a != b
+    assert len(set(names)) > 1
+
+
+def test_play_named_motion_starts_that_wave():
+    ch = Choreographer(FakeGateway())
+    target = next(m for m in PRESENCE_MOTIONS if m.role == ROLE_THINK)
+    result = asyncio.run(ch.play(target.name))
+    assert result["ok"] is True
+    assert result["name"] == target.name and result["role"] == ROLE_THINK
+    waves = _calls_by(ch, "self.robot.set_head_wave")
+    assert len(waves) == 1 and waves[0]["yaw_amp"] == target.yaw_amp
+
+
+def test_play_unknown_motion_lists_catalog():
+    ch = Choreographer(FakeGateway())
+    result = asyncio.run(ch.play("nope-not-a-motion"))
+    assert result["ok"] is False
+    assert "nope-not-a-motion" in result["error"]
+    assert set(result["motions"]) == {m.name for m in PRESENCE_MOTIONS}
