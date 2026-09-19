@@ -1010,3 +1010,62 @@ async def test_ask_hermes_stream_empty_reply_raises(monkeypatch, aiohttp_unused_
             await ask_hermes_stream("hey", session_id="sess-test")
     finally:
         await runner.cleanup()
+
+
+# ---- native session mint (create_hermes_session) -------------------------
+
+
+async def _run_hermes_json_stub(handler, aiohttp_unused_port):
+    """Run ``handler`` behind the native POST /api/sessions route."""
+    app = web.Application()
+    app.router.add_route("POST", "/api/sessions", handler)
+    port = aiohttp_unused_port()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    return runner, f"http://127.0.0.1:{port}"
+
+
+@pytest.mark.asyncio
+async def test_create_hermes_session_accepts_201_and_returns_id(
+    monkeypatch, aiohttp_unused_port
+):
+    """POST /api/sessions answers 201 Created; post_json must accept 2xx
+    and create_hermes_session must return the nested session.id."""
+
+    async def handle(request: web.Request) -> web.Response:
+        return web.json_response(
+            {"object": "hermes.session", "session": {"id": "api_123"}}, status=201
+        )
+
+    runner, base_url = await _run_hermes_json_stub(handle, aiohttp_unused_port)
+    monkeypatch.setenv("HERMES_API_URL", base_url)
+    monkeypatch.delenv("HERMES_API_KEY", raising=False)
+
+    try:
+        session_id = await hermes_bridge.create_hermes_session()
+    finally:
+        await runner.cleanup()
+
+    assert session_id == "api_123"
+
+
+@pytest.mark.asyncio
+async def test_create_hermes_session_missing_id_raises(
+    monkeypatch, aiohttp_unused_port
+):
+    """A 2xx body without session.id is malformed → RuntimeError."""
+
+    async def handle(request: web.Request) -> web.Response:
+        return web.json_response({"object": "oops"}, status=201)
+
+    runner, base_url = await _run_hermes_json_stub(handle, aiohttp_unused_port)
+    monkeypatch.setenv("HERMES_API_URL", base_url)
+    monkeypatch.delenv("HERMES_API_KEY", raising=False)
+
+    try:
+        with pytest.raises(RuntimeError, match="missing session.id"):
+            await hermes_bridge.create_hermes_session()
+    finally:
+        await runner.cleanup()

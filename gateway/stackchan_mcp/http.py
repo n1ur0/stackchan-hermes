@@ -46,7 +46,7 @@ async def post_json(
 ) -> Any:
     """POST ``payload`` as JSON and return the parsed JSON response body.
 
-    Any non-200 answer is logged (upstream body truncated to
+    Any non-2xx answer is logged (upstream body truncated to
     ``body_snippet`` chars) and raises ``RuntimeError(f"{name} returned
     status=...")`` — the shared error discipline of the Hermes / local
     LLM / Tavily callers. aiohttp network errors propagate unchanged.
@@ -55,7 +55,7 @@ async def post_json(
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(url, json=payload, headers=headers) as resp:
             body = await resp.text()
-            if resp.status != 200:
+            if not 200 <= resp.status < 300:
                 (logger.warning if log_warning else logger.error)(
                     "%s status=%d body=%s", name, resp.status, body[:body_snippet]
                 )
