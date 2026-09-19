@@ -15,17 +15,16 @@ closes the conversation loop in-process:
 Environment variables:
 
 - ``HERMES_API_URL`` — base URL of the Hermes API server adapter.
-  Defaults to ``http://127.0.0.1:8642``.
+  Defaults to ``http://127.0.0.1:8642`` (the stackchan profile gateway).
 - ``HERMES_API_KEY`` — bearer token for the Hermes API server. Optional;
-  when set, requests also carry ``X-Hermes-Session-Id`` so Hermes keeps
-  conversation context (session continuity requires the key).
-- ``HERMES_SESSION_ID`` — Phase 2: the *base namespace* for the session
-  id. By default each spoken conversation gets its own rotating id
-  (``<base>-<short uuid>``) so context is kept within a conversation but
-  no longer piles every conversation into one ever-growing session; see
-  ``HERMES_SESSION_WINDOW_S`` in :mod:`stackchan_mcp.multiturn`. Defaults
-  to ``stackchan-voice``. Set ``HERMES_SESSION_WINDOW_S=0`` to disable
-  rotation and use this value as a fixed id, as before.
+  when set, voice turns use the native Sessions API
+  (``POST /api/sessions`` + ``/api/sessions/{id}/chat/stream``), which
+  owns conversation history server-side — multi-turn context works
+  without any client-resent history or ``X-Hermes-Session-Id`` header.
+- ``HERMES_SESSION_ID`` — Phase 2 (legacy): the *base namespace* formerly
+  used to mint client-side session ids. The native Sessions API replaced
+  that with real server sessions; the id is now only a fixed fallback
+  when ``HERMES_SESSION_WINDOW_S=0``. Defaults to ``stackchan-voice``.
 - ``HERMES_VOICE_SYSTEM_PROMPT`` — overrides the default system prompt
   that keeps spoken replies short.
 - ``STACKCHAN_AUDIO_HOOK_TOKEN`` — shared bearer token; when set, the
@@ -239,6 +238,38 @@ async def ask_hermes(
     return reply.strip()
 
 
+async def create_hermes_session() -> str:
+    """Create an empty Hermes session via the native Sessions API.
+
+    Returns the server-side session id (e.g. ``api_...``). The
+    /api/sessions/{id}/chat/stream endpoint only accepts sessions that
+    exist, so one POST per conversation (or rotation) is required — this
+    IS the mint behind ``MultiturnSession.conversation_id``; no
+    client-minted ``X-Hermes-Session-Id`` header is involved anymore.
+    Title-less creation is fine (the server leaves ``title`` null);
+    a unique title is only needed when the caller wants named sessions.
+
+    Raises ``RuntimeError`` on any non-200 or a malformed body.
+    """
+    base_url = os.getenv("HERMES_API_URL", DEFAULT_HERMES_API_URL).rstrip("/")
+    api_key = os.getenv("HERMES_API_KEY", "")
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    data = await http.post_json(
+        f"{base_url}/api/sessions",
+        {},
+        name="Hermes API (create session)",
+        timeout_s=30.0,
+        headers=headers,
+    )
+    session = data.get("session") or {}
+    session_id = session.get("id")
+    if not session_id:
+        raise RuntimeError("Hermes API create-session response missing session.id")
+    return session_id
+
+
 async def ask_hermes_stream(
     text: str,
     *,
@@ -246,16 +277,22 @@ async def ask_hermes_stream(
     system_prompt: str | None = None,
     on_step: Any | None = None,
 ) -> str:
-    """Stream one user turn to the Hermes API, surfacing agent steps live.
+    """Stream one user turn through the native Hermes Sessions API.
 
-    Identical request shape to :func:`ask_hermes`` but with
-    ``stream: true``, so the Hermes server pushes ``hermes.tool.progress``
-    events the moment the agent starts a tool, instead of one JSON blob
-    when the whole turn finishes. ``on_step`` (if given) is awaited with
-    ``(tool_name, label)`` for every tool the agent starts, letting the
-    caller show what the robot is doing while it works. Returns the
-    final reply text (assembled from the streamed chunks) — or raises
-    ``RuntimeError`` if the stream never produced a reply.
+    POSTs to ``/api/sessions/{session_id}/chat/stream`` (the server owns
+    conversation history, so multi-turn context survives client-side
+    restarts — no ``X-Hermes-Session-Id`` header, no resending the
+    history). The stream's SSE events carry live agent activity:
+
+    - ``tool.started``: the agent began a tool — ``on_step(tool_name,
+      preview)`` is awaited so the device can show progress like
+      "Searching: ..." while the turn runs (Phase F).
+    - ``assistant.delta``: reply text chunks, accumulated.
+    - ``assistant.completed``: the authoritative final reply.
+    - ``run.completed`` / ``run.failed`` / ``done``: terminal events.
+
+    Returns the final reply text — or raises ``RuntimeError`` if the
+    stream never produced a reply.
     """
     base_url = os.getenv("HERMES_API_URL", DEFAULT_HERMES_API_URL).rstrip("/")
     api_key = os.getenv("HERMES_API_KEY", "")
@@ -267,45 +304,42 @@ async def ask_hermes_stream(
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-        headers["X-Hermes-Session-Id"] = session_id or os.getenv(
-            "HERMES_SESSION_ID", DEFAULT_HERMES_SESSION_ID
-        )
 
     payload = {
-        "model": "hermes-agent",
-        "stream": True,
-        "messages": [
-            {
-                "role": "system",
-                "content": system_prompt + HERMES_VOICE_TOOLS_LINE,
-            },
-            {"role": "user", "content": text},
-        ],
+        "input": text,
+        "instructions": system_prompt + HERMES_VOICE_TOOLS_LINE,
     }
 
     reply_parts: list[str] = []
+    final_content: str | None = None
     async for event, data in http.post_sse_events(
-        f"{base_url}/v1/chat/completions",
+        f"{base_url}/api/sessions/{session_id}/chat/stream",
         payload,
         name="Hermes API",
         timeout_s=HERMES_TIMEOUT_S,
         headers=headers,
     ):
-        if event == "hermes.tool.progress" and on_step is not None:
-            if isinstance(data, dict) and data.get("status") == "running":
+        if event == "tool.started" and on_step is not None:
+            if isinstance(data, dict):
                 try:
-                    await on_step(data.get("tool", ""), data.get("label", ""))
+                    await on_step(data.get("tool_name", ""), data.get("preview", ""))
                 except Exception:
                     logger.warning("ask_hermes_stream: on_step raised", exc_info=True)
             continue
-        # Plain OpenAI chunk: collect the assistant content deltas.
-        for choice in data.get("choices", []) if isinstance(data, dict) else []:
-            delta = choice.get("delta") or {}
-            content = delta.get("content")
-            if isinstance(content, str):
-                reply_parts.append(content)
+        if event == "assistant.delta":
+            delta = data.get("delta")
+            if isinstance(delta, str):
+                reply_parts.append(delta)
+            continue
+        if event == "assistant.completed":
+            content = data.get("content")
+            if isinstance(content, str) and content:
+                final_content = content
+            continue
+        if event in ("run.completed", "run.failed", "run.cancelled", "done"):
+            break
 
-    reply = "".join(reply_parts).strip()
+    reply = (final_content or "".join(reply_parts)).strip()
     if not reply:
         raise RuntimeError("Hermes API returned an empty reply")
     return reply
@@ -327,8 +361,9 @@ async def generate_reply(
     routing can never kill a conversation. ``route`` is ``"local"`` or
     ``"hermes"``. With ``force_hermes`` set (the dashboard's Hermes-pin
     toggle) the local fast-path is skipped entirely and every turn goes
-    to Hermes. ``session_id`` is threaded to :func:`ask_hermes` so the
-    Hermes-routed turn carries the per-conversation context id (Phase 2).
+    to Hermes. ``session_id`` is the server-side Hermes session id
+    (native Sessions API) threaded to :func:`ask_hermes_stream` so the
+    Hermes-routed turn carries the per-conversation context (Phase 2).
 
     ``on_step`` is forwarded to :func:`ask_hermes_stream`: when the
     Hermes agent starts a tool, the callback receives ``(tool, label)``
@@ -413,22 +448,26 @@ async def handle_voice_turn(request: web.Request) -> web.Response:
     if gateway.multiturn.is_gap_stale(now, multiturn.session_timeout_s()):
         gateway.multiturn.reset()
 
-    # Phase 2 — per-conversation Hermes context id. Rotate to a fresh id
-    # when the previous turn is older than the context window (or none is
-    # open) and reuse it across the turns of one conversation, so Hermes
-    # keeps context without piling every conversation into one
-    # ever-growing session. HERMES_SESSION_WINDOW_S=0 disables rotation
-    # (fixed HERMES_SESSION_ID, as before). conversation_id reads
-    # last_activity *before* we advance it for this turn.
-    base_session = os.getenv("HERMES_SESSION_ID", DEFAULT_HERMES_SESSION_ID)
-    hermes_session_id = (
-        gateway.multiturn.conversation_id(
+    # Phase 2 — per-conversation Hermes context. Rotate to a fresh
+    # server-side session (created via the native Sessions API) when the
+    # previous turn is older than the context window (or none is open)
+    # and reuse it across the turns of one conversation, so Hermes keeps
+    # context without piling every conversation into one ever-growing
+    # session. HERMES_SESSION_WINDOW_S=0 disables rotation (one
+    # persistent session, as before). conversation_id reads
+    # last_activity *before* we advance it for this turn. A session
+    # creation failure here is not fatal: the turn proceeds with an
+    # empty id and only an actual Hermes-routed call errors out (local
+    # turns stay up when the Hermes box is down).
+    try:
+        hermes_session_id = await gateway.multiturn.conversation_id(
             now=now,
             window_s=multiturn.session_window_s(),
-            mint=lambda: multiturn.new_session_id(base_session),
+            mint=create_hermes_session,
         )
-        or base_session
-    )
+    except Exception as exc:
+        logger.warning("voice_turn: Hermes session create failed: %s", exc)
+        hermes_session_id = ""
     gateway.multiturn.last_activity = now
 
     session_id = request.headers.get("X-StackChan-Session", "")

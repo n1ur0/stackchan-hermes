@@ -1,6 +1,7 @@
 """Tests for the Hermes voice bridge (ask_hermes request shape)."""
 
 import json
+import os
 from typing import Any
 from unittest import mock
 
@@ -265,6 +266,16 @@ def _patch_voice_pipeline(
             return _StubEngine(transcript)
 
     monkeypatch.setattr(stt_mod, "get_registry", lambda: _Registry())
+
+    # The brain mint (native Sessions API) is a network call — stub it
+    # with a deterministic fake so every voice-turn test is hermetic.
+    session_seq = {"n": 0}
+
+    async def fake_create_session() -> str:
+        session_seq["n"] += 1
+        return f"api_test_{session_seq['n']}"
+
+    monkeypatch.setattr(hermes_bridge, "create_hermes_session", fake_create_session)
 
     async def fake_generate_reply(
         text, *, force_hermes=False, session_id=None, on_step=None
@@ -762,9 +773,8 @@ async def test_multiturn_empty_transcript_resets_counter(monkeypatch, voice_turn
 
 @pytest.mark.asyncio
 async def test_voice_turn_threads_rotating_conversation_id(monkeypatch, voice_turn):
-    """Phase 2: the voice turn threads a per-conversation Hermes id into
-    the brain call — reused within the context window, rotated past it."""
-    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)  # default base
+    """Phase 2: the voice turn threads a per-conversation Hermes session id
+    into the brain call — reused within the context window, rotated past it."""
     monkeypatch.delenv("HERMES_SESSION_WINDOW_S", raising=False)  # default 180
     seen: list[str | None] = []
 
@@ -784,16 +794,17 @@ async def test_voice_turn_threads_rotating_conversation_id(monkeypatch, voice_tu
     monkeypatch.setattr(hermes_bridge.time, "monotonic", lambda: 5000.0)
     await runner.run()
 
-    assert all(s and s.startswith("stackchan-voice-") for s in seen)
+    assert all(s and s.startswith("api_test_") for s in seen)
     assert seen[0] == seen[1]  # same conversation, context retained
     assert seen[2] != seen[0]  # rotated after the window
 
 
 @pytest.mark.asyncio
-async def test_voice_turn_window_zero_uses_fixed_session_id(monkeypatch, voice_turn):
-    """HERMES_SESSION_WINDOW_S=0 disables rotation — every turn carries
-    the fixed HERMES_SESSION_ID, exactly as before Phase 2."""
-    monkeypatch.setenv("HERMES_SESSION_ID", "stackchan-voice")
+async def test_voice_turn_window_zero_uses_one_persistent_session(
+    monkeypatch, voice_turn
+):
+    """HERMES_SESSION_WINDOW_S=0 disables rotation — one session is created
+    on first use and every later turn reuses it (persistent conversation)."""
     monkeypatch.setenv("HERMES_SESSION_WINDOW_S", "0")
     seen: list[str | None] = []
 
@@ -810,8 +821,8 @@ async def test_voice_turn_window_zero_uses_fixed_session_id(monkeypatch, voice_t
     monkeypatch.setattr(hermes_bridge.time, "monotonic", lambda: 9000.0)
     await runner.run()
 
-    # No rotation: the base id is used verbatim on every turn.
-    assert seen == ["stackchan-voice", "stackchan-voice"]
+    # No rotation: one minted session reused verbatim on every turn.
+    assert seen == ["api_test_1", "api_test_1"]
 
 
 @pytest.mark.asyncio
@@ -887,10 +898,12 @@ def test_tool_status_text_mapping(tool, label, expected):
     assert tool_status_text(tool, label) == expected
 
 
-async def _run_hermes_sse_stub(handler, aiohttp_unused_port):
-    """Run ``handler`` behind POST /v1/chat/completions returning SSE."""
+async def _run_hermes_sse_stub(
+    handler, aiohttp_unused_port, session_id: str = "sess-test"
+):
+    """Run ``handler`` behind the native session-chat/stream SSE route."""
     app = web.Application()
-    app.router.add_route("POST", "/v1/chat/completions", handler)
+    app.router.add_route("POST", f"/api/sessions/{session_id}/chat/stream", handler)
     port = aiohttp_unused_port()
     runner = web.AppRunner(app)
     await runner.setup()
@@ -900,56 +913,44 @@ async def _run_hermes_sse_stub(handler, aiohttp_unused_port):
 
 
 def _sse_body(*, tool: str | None = None, label: str = "", reply: str = "ok") -> str:
-    """Build a realistic Hermes SSE response (tool progress + content)."""
+    """Build a realistic native Hermes session-stream SSE response."""
     lines: list[str] = []
     if tool is not None:
-        lines.append("event: hermes.tool.progress")
+        lines.append("event: tool.started")
         lines.append(
             "data: "
             + json.dumps(
                 {
-                    "tool": tool,
-                    "emoji": "\U0001f50d",
-                    "label": label,
-                    "status": "running",
+                    "message_id": "msg_test",
+                    "tool_name": tool,
+                    "preview": label or None,
+                    "args": {"query": label} if label else None,
                 }
             )
         )
         lines.append("")
-        lines.append("event: hermes.tool.progress")
-        lines.append("data: " + json.dumps({"tool": tool, "status": "completed"}))
+        lines.append("event: tool.completed")
+        lines.append("data: " + json.dumps({"tool_name": tool, "preview": None}))
         lines.append("")
+    lines.append("event: assistant.delta")
+    lines.append("data: " + json.dumps({"delta": reply}))
+    lines.append("")
+    lines.append("event: assistant.completed")
     lines.append(
-        "data: "
-        + json.dumps(
-            {
-                "id": "chatcmpl-test",
-                "object": "chat.completion.chunk",
-                "choices": [
-                    {"index": 0, "delta": {"content": reply}, "finish_reason": None}
-                ],
-            }
-        )
+        "data: " + json.dumps({"content": reply, "completed": True, "partial": False})
     )
     lines.append("")
-    lines.append(
-        "data: "
-        + json.dumps(
-            {
-                "id": "chatcmpl-test",
-                "object": "chat.completion.chunk",
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-            }
-        )
-    )
+    lines.append("event: run.completed")
+    lines.append("data: " + json.dumps({"completed": True, "messages": []}))
     lines.append("")
-    lines.append("data: [DONE]")
+    lines.append("event: done")
+    lines.append("data: " + json.dumps({}))
     return "\n".join(lines)
 
 
 @pytest.mark.asyncio
 async def test_ask_hermes_stream_surfaces_tool_steps(monkeypatch, aiohttp_unused_port):
-    """hermes.tool.progress SSE events reach on_step; reply is assembled."""
+    """tool.started SSE events reach on_step; reply is assembled."""
     received: dict[str, Any] = {}
     steps: list[tuple[str, str]] = []
 
@@ -968,26 +969,35 @@ async def test_ask_hermes_stream_surfaces_tool_steps(monkeypatch, aiohttp_unused
         steps.append((tool, label))
 
     try:
-        reply = await ask_hermes_stream("weather?", on_step=on_step)
+        reply = await ask_hermes_stream(
+            "weather?", session_id="sess-test", on_step=on_step
+        )
     finally:
         await runner.cleanup()
 
     assert reply == "sunny"
-    # Only the "running" progress event fires on_step; "completed" does not.
     assert steps == [("web_search", "lisbon weather")]
-    assert received["payload"]["stream"] is True
+    # Native session-chat request: input + instructions (no messages[]).
+    assert received["payload"]["input"] == "weather?"
+    instructions = received["payload"]["instructions"]
+    assert instructions.startswith(
+        os.getenv("HERMES_VOICE_SYSTEM_PROMPT", DEFAULT_VOICE_SYSTEM_PROMPT)
+    )
+    assert HERMES_VOICE_TOOLS_LINE in instructions
 
 
 @pytest.mark.asyncio
 async def test_ask_hermes_stream_empty_reply_raises(monkeypatch, aiohttp_unused_port):
     """A stream with no content deltas surfaces as RuntimeError."""
 
-    # _sse_body always includes content; serve a bare chunk to force empty.
+    # _sse_body always includes content; serve only terminal events to
+    # force an empty reply.
     async def handle_empty(request: web.Request) -> web.Response:
         body = (
-            'data: {"id":"x","object":"chat.completion.chunk",'
-            '"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
-            "data: [DONE]\n"
+            "event: run.completed\n"
+            'data: {"completed": true, "messages": []}\n\n'
+            "event: done\n"
+            "data: {}\n"
         )
         return web.Response(text=body, content_type="text/event-stream")
 
@@ -997,6 +1007,6 @@ async def test_ask_hermes_stream_empty_reply_raises(monkeypatch, aiohttp_unused_
 
     try:
         with pytest.raises(RuntimeError, match="empty reply"):
-            await ask_hermes_stream("hey")
+            await ask_hermes_stream("hey", session_id="sess-test")
     finally:
         await runner.cleanup()
