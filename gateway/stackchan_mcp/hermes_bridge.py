@@ -68,6 +68,7 @@ DEFAULT_HERMES_SESSION_ID = "stackchan-voice"
 #: labels is treated like an empty transcript (drop the turn).
 _NON_SPEECH_LABEL_RE = re.compile(r"^(?:\[[^\]\n]*\][\s]*)+$")
 
+
 #: Hermes/DeepSeek drifts chatty even with the short-answer system prompt,
 #: and the device streams audio in realtime (one 60 ms Opus frame per
 #: push into a ~2.4 s decode queue), so a long reply stretches the turn
@@ -85,11 +86,15 @@ def _clamp_reply_for_voice(reply: str) -> str:
         return reply
     kept: list[str] = []
     for sentence in re.split(r"(?<=[.!?…])\s+", reply):
-        if len(kept) >= max_sentences or sum(map(len, kept)) + len(sentence) > max_chars:
+        if (
+            len(kept) >= max_sentences
+            or sum(map(len, kept)) + len(sentence) > max_chars
+        ):
             break
         kept.append(sentence)
     clamped = " ".join(kept).strip()
-    return clamped or reply[: max_chars].rstrip()
+    return clamped or reply[:max_chars].rstrip()
+
 
 #: Spoken replies must stay short — they are synthesised and played on
 #: a 1 W speaker, and long monologues kill the conversation rhythm.
@@ -118,6 +123,45 @@ HERMES_VOICE_TOOLS_LINE = (
 #: Hard ceiling for one Hermes turn. The agent may run tools internally;
 #: beyond this the voice interaction is dead anyway.
 HERMES_TIMEOUT_S = 120.0
+
+#: Tool-name → short LCD label shown while the Hermes agent runs the
+#: tool (hermes.tool.progress SSE events). The device status line is one
+#: short line near the top of the LCD; labels must be terse and end with
+#: "..." so the user knows a turn is still alive.
+TOOL_STATUS_LABELS: dict[str, str] = {
+    "web_search": "Searching...",
+    "search_web": "Searching...",
+    "write_note": "Saving note...",
+    "read_note": "Reading note...",
+    "list_notes": "Reading notes...",
+    "take_photo": "Taking photo...",
+    "move_head": "Moving head...",
+    "set_avatar": "Changing face...",
+    "switchbot_on": "Switching on...",
+    "switchbot_off": "Switching off...",
+    "switchbot_toggle": "Switching...",
+    "get_status": "Checking status...",
+    "get_device_status": "Checking status...",
+}
+DEFAULT_TOOL_STATUS = "Working..."
+
+#: The web_search tool label carries the query itself; use it verbatim
+#: (truncated) instead of the generic "Searching..." so the user sees
+#: what the agent is looking up.
+_SEARCH_LABEL_PREFIX = "Searching: "
+
+
+def tool_status_text(tool: str, label: str = "") -> str:
+    """Map a Hermes tool name to a short device status line."""
+    base = TOOL_STATUS_LABELS.get(tool, DEFAULT_TOOL_STATUS)
+    if tool == "web_search" and label.strip():
+        text = _SEARCH_LABEL_PREFIX + label.strip()
+        # LCD line is short; keep the query recognizable but bounded.
+        if len(text) > 40:
+            text = text[:39].rstrip() + "..."
+        return text
+    return base
+
 
 #: Upper bound for one uploaded capture. Device-driven recordings are
 #: capped at 30 s on the firmware side; Opus at 16 kHz mono runs well
@@ -195,8 +239,84 @@ async def ask_hermes(
     return reply.strip()
 
 
+async def ask_hermes_stream(
+    text: str,
+    *,
+    session_id: str | None = None,
+    system_prompt: str | None = None,
+    on_step: Any | None = None,
+) -> str:
+    """Stream one user turn to the Hermes API, surfacing agent steps live.
+
+    Identical request shape to :func:`ask_hermes`` but with
+    ``stream: true``, so the Hermes server pushes ``hermes.tool.progress``
+    events the moment the agent starts a tool, instead of one JSON blob
+    when the whole turn finishes. ``on_step`` (if given) is awaited with
+    ``(tool_name, label)`` for every tool the agent starts, letting the
+    caller show what the robot is doing while it works. Returns the
+    final reply text (assembled from the streamed chunks) — or raises
+    ``RuntimeError`` if the stream never produced a reply.
+    """
+    base_url = os.getenv("HERMES_API_URL", DEFAULT_HERMES_API_URL).rstrip("/")
+    api_key = os.getenv("HERMES_API_KEY", "")
+    if system_prompt is None:
+        system_prompt = os.getenv(
+            "HERMES_VOICE_SYSTEM_PROMPT", DEFAULT_VOICE_SYSTEM_PROMPT
+        )
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+        headers["X-Hermes-Session-Id"] = session_id or os.getenv(
+            "HERMES_SESSION_ID", DEFAULT_HERMES_SESSION_ID
+        )
+
+    payload = {
+        "model": "hermes-agent",
+        "stream": True,
+        "messages": [
+            {
+                "role": "system",
+                "content": system_prompt + HERMES_VOICE_TOOLS_LINE,
+            },
+            {"role": "user", "content": text},
+        ],
+    }
+
+    reply_parts: list[str] = []
+    async for event, data in http.post_sse_events(
+        f"{base_url}/v1/chat/completions",
+        payload,
+        name="Hermes API",
+        timeout_s=HERMES_TIMEOUT_S,
+        headers=headers,
+    ):
+        if event == "hermes.tool.progress" and on_step is not None:
+            if isinstance(data, dict) and data.get("status") == "running":
+                try:
+                    await on_step(data.get("tool", ""), data.get("label", ""))
+                except Exception:
+                    logger.warning("ask_hermes_stream: on_step raised", exc_info=True)
+            continue
+        # Plain OpenAI chunk: collect the assistant content deltas.
+        for choice in data.get("choices", []) if isinstance(data, dict) else []:
+            delta = choice.get("delta") or {}
+            content = delta.get("content")
+            if isinstance(content, str):
+                reply_parts.append(content)
+
+    reply = "".join(reply_parts).strip()
+    if not reply:
+        raise RuntimeError("Hermes API returned an empty reply")
+    return reply
+
+
 async def generate_reply(
-    text: str, *, force_hermes: bool = False, session_id: str | None = None
+    text: str,
+    *,
+    force_hermes: bool = False,
+    session_id: str | None = None,
+    on_step: Any | None = None,
 ) -> tuple[str, str]:
     """Produce the reply for one transcript, returning ``(reply, route)``.
 
@@ -209,6 +329,11 @@ async def generate_reply(
     toggle) the local fast-path is skipped entirely and every turn goes
     to Hermes. ``session_id`` is threaded to :func:`ask_hermes` so the
     Hermes-routed turn carries the per-conversation context id (Phase 2).
+
+    ``on_step`` is forwarded to :func:`ask_hermes_stream`: when the
+    Hermes agent starts a tool, the callback receives ``(tool, label)``
+    so the caller can show live progress on the device (Phase F). Local
+    turns are too fast to need it.
     """
     if (
         not force_hermes
@@ -225,7 +350,9 @@ async def generate_reply(
             logger.warning(
                 "voice_turn: local LLM failed (%s); falling back to Hermes", exc
             )
-    return await ask_hermes(text, session_id=session_id), local_llm.ROUTE_HERMES
+    return await ask_hermes_stream(
+        text, session_id=session_id, on_step=on_step
+    ), local_llm.ROUTE_HERMES
 
 
 def _check_token(request: web.Request) -> bool:
@@ -243,7 +370,7 @@ def _check_token(request: web.Request) -> bool:
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         return False
-    return hmac.compare_digest(auth[len("Bearer "):], expected)
+    return hmac.compare_digest(auth[len("Bearer ") :], expected)
 
 
 async def handle_voice_turn(request: web.Request) -> web.Response:
@@ -385,9 +512,7 @@ async def _run_voice_turn(
     if dump_dir:
         try:
             os.makedirs(dump_dir, exist_ok=True)
-            dump_path = os.path.join(
-                dump_dir, f"voice_turn_{int(time.time())}.ogg"
-            )
+            dump_path = os.path.join(dump_dir, f"voice_turn_{int(time.time())}.ogg")
             with open(dump_path, "wb") as fp:
                 fp.write(ogg)
             logger.info("voice_turn: capture dumped to %s", dump_path)
@@ -448,7 +573,8 @@ async def _run_voice_turn(
     if _NON_SPEECH_LABEL_RE.match(transcript):
         logger.info(
             "voice_turn: non-speech labels (%r), dropping session=%s",
-            transcript[:120], session_id,
+            transcript[:120],
+            session_id,
         )
         gateway.multiturn.reset()
         return web.json_response(
@@ -457,6 +583,15 @@ async def _run_voice_turn(
 
     logger.info("voice_turn: transcript=%r session=%s", transcript[:120], session_id)
     await control.set_device_status_text(gateway, control.STATUS_THINKING)
+
+    # Phase F (steps): stream the Hermes turn and surface each tool the
+    # agent starts as a short LCD status line ("Searching...", "Saving
+    # note...", ...) so the screen reflects actual progress instead of a
+    # static "Thinking..." for the whole LLM round-trip. Best-effort:
+    # set_device_status_text swallows failures.
+    async def _report_step(tool: str, label: str = "") -> None:
+        await control.set_device_status_text(gateway, tool_status_text(tool, label))
+
     # The dashboard's Hermes-pin toggle (persisted in the control state):
     # read once per turn and thread into both the LED hint and the reply
     # routing so a pinned turn lights the Hermes colour immediately.
@@ -473,7 +608,10 @@ async def _run_voice_turn(
         await control.apply_led_state(gateway, "hermes")
     try:
         reply, route = await generate_reply(
-            transcript, force_hermes=force_hermes, session_id=hermes_session_id
+            transcript,
+            force_hermes=force_hermes,
+            session_id=hermes_session_id,
+            on_step=_report_step,
         )
     except Exception as exc:
         logger.exception("voice_turn: Hermes call failed")
@@ -618,9 +756,7 @@ async def _maybe_continue(
     try:
         await gateway.esp32.send_listen_state("start", mode="manual")
     except ConnectionError:
-        logger.warning(
-            "multiturn: device gone before re-listen; ending conversation"
-        )
+        logger.warning("multiturn: device gone before re-listen; ending conversation")
         gateway.multiturn.reset()
         gateway.multiturn_active = False
         return False

@@ -14,6 +14,8 @@ from stackchan_mcp.hermes_bridge import (
     DEFAULT_VOICE_SYSTEM_PROMPT,
     HERMES_VOICE_TOOLS_LINE,
     ask_hermes,
+    ask_hermes_stream,
+    tool_status_text,
 )
 from stackchan_mcp.multiturn import MultiturnSession
 
@@ -264,7 +266,13 @@ def _patch_voice_pipeline(
 
     monkeypatch.setattr(stt_mod, "get_registry", lambda: _Registry())
 
-    async def fake_generate_reply(text, *, force_hermes=False, session_id=None):
+    async def fake_generate_reply(
+        text, *, force_hermes=False, session_id=None, on_step=None
+    ):
+        # Exercise the real streaming callback so step labels get
+        # recorded like a live Hermes turn would produce them.
+        if on_step is not None:
+            await on_step("web_search", "lisbon weather")
         return reply, route
 
     monkeypatch.setattr(hermes_bridge, "generate_reply", fake_generate_reply)
@@ -381,10 +389,12 @@ async def test_voice_turn_status_text_sequence(monkeypatch, voice_turn):
     response = await runner.run()
 
     assert response.status == 200
-    # I'm listening... (STT) → Thinking... (brain) → "" (clear in finally).
+    # I'm listening... (STT) → Thinking... (brain) → live tool step
+    # (streamed hermes.tool.progress) → "" (clear in finally).
     assert runner.seen == [
         control.STATUS_LISTENING,
         control.STATUS_THINKING,
+        hermes_bridge.tool_status_text("web_search", "lisbon weather"),
         control.STATUS_CLEAR,
     ]
     assert runner.gateway.voice_turn_active is False
@@ -406,7 +416,7 @@ async def test_voice_turn_clears_status_on_empty_transcript(monkeypatch, voice_t
 
 @pytest.mark.asyncio
 async def test_voice_turn_clears_status_when_brain_fails(monkeypatch, voice_turn):
-    async def boom(text, *, force_hermes=False, session_id=None):
+    async def boom(text, *, force_hermes=False, session_id=None, on_step=None):
         raise RuntimeError("hermes down")
 
     runner = voice_turn(transcript="weather?", generate_reply=boom)
@@ -519,7 +529,7 @@ async def test_voice_turn_non_speech_labels_dropped(monkeypatch, voice_turn, lab
     TV/room audio must not trigger a reply). Same drop path as silence."""
     calls: list[str] = []
 
-    async def spy(text, *, force_hermes=False, session_id=None):
+    async def spy(text, *, force_hermes=False, session_id=None, on_step=None):
         calls.append(text)
         return "nope", "hermes"
 
@@ -577,11 +587,11 @@ async def test_generate_reply_routing_by_force_flag(monkeypatch, force, expected
         called["local"] = True
         return "local"
 
-    async def fake_hermes(text, *, session_id=None):
+    async def fake_hermes(text, *, session_id=None, on_step=None):
         return "hermes"
 
     monkeypatch.setattr(local_llm, "ask_local", fake_local)
-    monkeypatch.setattr(hermes_bridge, "ask_hermes", fake_hermes)
+    monkeypatch.setattr(hermes_bridge, "ask_hermes_stream", fake_hermes)
 
     reply, route = await hermes_bridge.generate_reply("short", force_hermes=force)
 
@@ -596,7 +606,7 @@ async def test_voice_turn_force_hermes_lights_hermes_and_passes_flag(
 ):
     seen: dict[str, bool] = {}
 
-    async def fake_gr(text, *, force_hermes=False, session_id=None):
+    async def fake_gr(text, *, force_hermes=False, session_id=None, on_step=None):
         seen["force_hermes"] = force_hermes
         return "hello", "hermes"
 
@@ -758,7 +768,7 @@ async def test_voice_turn_threads_rotating_conversation_id(monkeypatch, voice_tu
     monkeypatch.delenv("HERMES_SESSION_WINDOW_S", raising=False)  # default 180
     seen: list[str | None] = []
 
-    async def capture_gr(text, *, force_hermes=False, session_id=None):
+    async def capture_gr(text, *, force_hermes=False, session_id=None, on_step=None):
         seen.append(session_id)
         return "yes", "hermes"
 
@@ -787,7 +797,7 @@ async def test_voice_turn_window_zero_uses_fixed_session_id(monkeypatch, voice_t
     monkeypatch.setenv("HERMES_SESSION_WINDOW_S", "0")
     seen: list[str | None] = []
 
-    async def capture_gr(text, *, force_hermes=False, session_id=None):
+    async def capture_gr(text, *, force_hermes=False, session_id=None, on_step=None):
         seen.append(session_id)
         return "yes", "hermes"
 
@@ -831,6 +841,162 @@ async def test_multiturn_continuation_skips_display_clear(monkeypatch, voice_tur
 
     await runner.run()
 
-    # I'm listening... → Thinking..., but NO trailing clear (would blank the re-listen).
+    # I'm listening... → Thinking... → live tool step, but NO trailing
+    # clear (would blank the re-listen).
     assert control.STATUS_CLEAR not in runner.seen
-    assert runner.seen == [control.STATUS_LISTENING, control.STATUS_THINKING]
+    assert runner.seen == [
+        control.STATUS_LISTENING,
+        control.STATUS_THINKING,
+        hermes_bridge.tool_status_text("web_search", "lisbon weather"),
+    ]
+
+
+# ---- Phase F (steps): streaming tool progress on the LCD ----------------
+
+
+@pytest.mark.parametrize(
+    ("tool", "label", "expected"),
+    [
+        # Known tools map to terse labels.
+        ("web_search", "", "Searching..."),
+        ("write_note", "", "Saving note..."),
+        ("take_photo", "", "Taking photo..."),
+        # Unknown tools fall back to a generic working label.
+        ("some_new_tool", "", "Working..."),
+        # web_search shows the query itself (truncated to the LCD budget).
+        ("web_search", "lisbon", "Searching: lisbon"),
+        (
+            "web_search",
+            "a very long query that would overflow the one-line LCD label",
+            "Searching: a very long query that would...",
+        ),
+        # Non-web_search tools ignore the label.
+        ("write_note", "whatever label", "Saving note..."),
+    ],
+    ids=[
+        "web-search-generic",
+        "write-note",
+        "take-photo",
+        "unknown-tool",
+        "web-search-query",
+        "web-search-query-truncated",
+        "non-search-label-ignored",
+    ],
+)
+def test_tool_status_text_mapping(tool, label, expected):
+    assert tool_status_text(tool, label) == expected
+
+
+async def _run_hermes_sse_stub(handler, aiohttp_unused_port):
+    """Run ``handler`` behind POST /v1/chat/completions returning SSE."""
+    app = web.Application()
+    app.router.add_route("POST", "/v1/chat/completions", handler)
+    port = aiohttp_unused_port()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    return runner, f"http://127.0.0.1:{port}"
+
+
+def _sse_body(*, tool: str | None = None, label: str = "", reply: str = "ok") -> str:
+    """Build a realistic Hermes SSE response (tool progress + content)."""
+    lines: list[str] = []
+    if tool is not None:
+        lines.append("event: hermes.tool.progress")
+        lines.append(
+            "data: "
+            + json.dumps(
+                {
+                    "tool": tool,
+                    "emoji": "\U0001f50d",
+                    "label": label,
+                    "status": "running",
+                }
+            )
+        )
+        lines.append("")
+        lines.append("event: hermes.tool.progress")
+        lines.append("data: " + json.dumps({"tool": tool, "status": "completed"}))
+        lines.append("")
+    lines.append(
+        "data: "
+        + json.dumps(
+            {
+                "id": "chatcmpl-test",
+                "object": "chat.completion.chunk",
+                "choices": [
+                    {"index": 0, "delta": {"content": reply}, "finish_reason": None}
+                ],
+            }
+        )
+    )
+    lines.append("")
+    lines.append(
+        "data: "
+        + json.dumps(
+            {
+                "id": "chatcmpl-test",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            }
+        )
+    )
+    lines.append("")
+    lines.append("data: [DONE]")
+    return "\n".join(lines)
+
+
+@pytest.mark.asyncio
+async def test_ask_hermes_stream_surfaces_tool_steps(monkeypatch, aiohttp_unused_port):
+    """hermes.tool.progress SSE events reach on_step; reply is assembled."""
+    received: dict[str, Any] = {}
+    steps: list[tuple[str, str]] = []
+
+    async def handle(request: web.Request) -> web.Response:
+        received["payload"] = await request.json()
+        return web.Response(
+            text=_sse_body(tool="web_search", label="lisbon weather", reply=" sunny"),
+            content_type="text/event-stream",
+        )
+
+    runner, base_url = await _run_hermes_sse_stub(handle, aiohttp_unused_port)
+    monkeypatch.setenv("HERMES_API_URL", base_url)
+    monkeypatch.delenv("HERMES_API_KEY", raising=False)
+
+    async def on_step(tool: str, label: str = "") -> None:
+        steps.append((tool, label))
+
+    try:
+        reply = await ask_hermes_stream("weather?", on_step=on_step)
+    finally:
+        await runner.cleanup()
+
+    assert reply == "sunny"
+    # Only the "running" progress event fires on_step; "completed" does not.
+    assert steps == [("web_search", "lisbon weather")]
+    assert received["payload"]["stream"] is True
+
+
+@pytest.mark.asyncio
+async def test_ask_hermes_stream_empty_reply_raises(monkeypatch, aiohttp_unused_port):
+    """A stream with no content deltas surfaces as RuntimeError."""
+
+    # _sse_body always includes content; serve a bare chunk to force empty.
+    async def handle_empty(request: web.Request) -> web.Response:
+        body = (
+            'data: {"id":"x","object":"chat.completion.chunk",'
+            '"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+            "data: [DONE]\n"
+        )
+        return web.Response(text=body, content_type="text/event-stream")
+
+    runner, base_url = await _run_hermes_sse_stub(handle_empty, aiohttp_unused_port)
+    monkeypatch.setenv("HERMES_API_URL", base_url)
+    monkeypatch.delenv("HERMES_API_KEY", raising=False)
+
+    try:
+        with pytest.raises(RuntimeError, match="empty reply"):
+            await ask_hermes_stream("hey")
+    finally:
+        await runner.cleanup()

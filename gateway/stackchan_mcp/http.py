@@ -22,6 +22,7 @@ import io
 import json
 import logging
 import struct
+from collections.abc import AsyncIterator
 from typing import Any, Sequence
 
 import aiohttp
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 # --- aiohttp client ----------------------------------------------------------
+
 
 async def post_json(
     url: str,
@@ -73,7 +75,66 @@ async def get_json(session: aiohttp.ClientSession, url: str) -> Any:
         return await resp.json(content_type=None)
 
 
+async def post_sse_events(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    name: str,
+    timeout_s: float,
+    headers: dict[str, str] | None = None,
+    body_snippet: int = 500,
+) -> AsyncIterator[tuple[str, Any]]:
+    """POST JSON and yield ``(event, data)`` for each SSE ``data:`` line.
+
+    The Hermes API server streams agent activity as
+    ``text/event-stream``: standard OpenAI ``chat.completion.chunk``
+    objects arrive as bare ``data:`` lines (event name ``""``) and
+    agent tool runs arrive as ``event: hermes.tool.progress`` followed
+    by a ``data:`` JSON body (``{"tool": ..., "label": ...,
+    "status": "running"}``). Each line is parsed and yielded with its
+    SSE event name so callers can react to tool progress without
+    waiting for the final reply.
+
+    Any non-200 answer is logged and raises ``RuntimeError`` exactly
+    like :func:`post_json`. The stream is read incrementally
+    (``resp.content``), so events surface as they happen; the total
+    wall-clock bound is still enforced by ``timeout_s``.
+    """
+    timeout = aiohttp.ClientTimeout(total=timeout_s)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, json=payload, headers=headers) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                logger.error(
+                    "%s status=%d body=%s", name, resp.status, body[:body_snippet]
+                )
+                raise RuntimeError(f"{name} returned status={resp.status}")
+            event = ""
+            async for raw in resp.content:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line:
+                    continue
+                if line.startswith("event:"):
+                    event = line[len("event:") :].strip()
+                    continue
+                if line.startswith("data:"):
+                    data = line[len("data:") :].strip()
+                    if data == "[DONE]":
+                        return
+                    try:
+                        parsed = json.loads(data)
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "%s: non-JSON SSE data: %s", name, data[:body_snippet]
+                        )
+                        event = ""
+                        continue
+                    yield event, parsed
+                    event = ""
+
+
 # --- aiohttp web server helpers ----------------------------------------------
+
 
 def json_error(message: str, status: int = 400) -> web.Response:
     """A JSON ``{"error": message}`` response with the given status."""
@@ -236,12 +297,12 @@ def _build_opus_head_packet(
     return struct.pack(
         "<8sBBHIhB",
         _OPUS_HEAD_MAGIC,
-        1,                 # version
+        1,  # version
         channels,
         pre_skip,
         input_sample_rate,  # informational; decoder always runs at 48 kHz
-        0,                 # output_gain (Q7.8 dB), 0 = unchanged
-        0,                 # channel_mapping_family: 0 = mono/stereo
+        0,  # output_gain (Q7.8 dB), 0 = unchanged
+        0,  # channel_mapping_family: 0 = mono/stereo
     )
 
 
