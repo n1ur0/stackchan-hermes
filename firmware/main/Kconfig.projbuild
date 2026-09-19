@@ -107,64 +107,6 @@ config STACKCHAN_MDNS_DISCOVERY
         Disable this option to compile out the mDNS dependency and require
         explicit NVS/Kconfig WebSocket URL configuration.
 
-config STACKCHAN_FACE_TRACKING
-    bool "Enable on-device face tracking (esp-dl)"
-    default n
-    depends on BOARD_TYPE_STACKCHAN
-    help
-        When enabled, the StackChan board runs an esp-dl HumanFaceDetect
-        on the on-board camera and adds a Reachy-style face offset to the
-        head servo pose (the head turns/looks toward the first detected
-        face, drifting back to neutral when no face is present).
-
-        This pulls in espressif/esp-dl and espressif/human_face_detect
-        (MSRMNP_S8_V1 model) and embeds the ~1 MB model into the app
-        partition (model location default = flash rodata), so it increases
-        firmware size. The camera preview is shared with the photo
-        upload / Explain path; keep the hardware streaming.
-
-        Disabled by default: it adds a CPU-heavy detection loop and binds
-        the head servo, so only enable it on StackChan boards where face
-        tracking is actually wanted.
-
-config STACKCHAN_FRAME_PUSH
-    bool "Enable low-latency camera frame push (no AI)"
-    default n
-    depends on BOARD_TYPE_STACKCHAN
-    help
-        When enabled, EspVideo::PushFrameForTracking() is compiled in: it
-        captures the latest camera frame, JPEG-encodes it at low quality
-        (~65, native 320x240, no rotation) and POSTs it to the configured
-        explain URL as a multipart "file" field only. Unlike Explain(), it
-        sends no question field and returns the server's raw response -- a
-        fast (~50-150ms encode, <=~300ms total) always-on frame pipeline
-        for a remote tracker that runs its own AI. Returns "" when a URL
-        is not configured.
-
-        Disabled by default and compiled out for a zero code-size impact,
-        matching the STACKCHAN_FACE_TRACKING opt-in philosophy.
-
-config STACKCHAN_TRACKING_URL
-    string "Remote face-tracking endpoint (frame push target)"
-    default ""
-    depends on BOARD_TYPE_STACKCHAN
-    help
-        When non-empty and STACKCHAN_FRAME_PUSH=y, the frame-push loop POSTs
-        each captured low-res JPEG to this URL (multipart 'file' only) instead
-        of the gateway vision (explain) URL -- a dedicated remote tracker that
-        runs its own face-detection AI and replies with a head pose. Leave
-        empty to fall back to the explain URL.
-
-config STACKCHAN_FRAME_PUSH_HZ
-    int "Frame-push cadence (frames per second)"
-    default 8
-    range 1 15
-    depends on BOARD_TYPE_STACKCHAN
-    help
-        How often the face-tracking task captures + pushes a JPEG to the
-        remote tracker. 8 Hz tracks a slowly-moving face smoothly while
-        staying well under the camera capture + JPEG-encode budget.
-
 choice
     prompt "Flash Assets"
     default FLASH_DEFAULT_ASSETS if !USE_EMOTE_MESSAGE_STYLE

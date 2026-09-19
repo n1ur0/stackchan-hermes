@@ -31,7 +31,6 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include "avatar_images.h"
 #include "avatar_set.h"
 #include "avatar_set_fetcher.h"
-#include "face_tracking.h"
 
 #include <smooth_ui_toolkit.hpp>
 #include <esp_log.h>
@@ -523,9 +522,6 @@ private:
     Ft6336* ft6336_;
     LcdDisplay* display_;
     EspVideo* camera_;
-    // Optional on-device face tracking (esp-dl). Null unless the board
-    // successfully started it (CONFIG_STACKCHAN_FACE_TRACKING=y).
-    std::unique_ptr<FaceTracking> face_tracking_;
     esp_timer_handle_t touchpad_timer_;
     PowerSaveTimer* power_save_timer_;
     ScsBus scs_bus_;
@@ -2459,13 +2455,6 @@ private:
 
         camera_ = new EspVideo(video_config);
         camera_->SetHMirror(false);
-#if defined(CONFIG_STACKCHAN_TRACKING_URL)
-        // Gateway steering: frame-push targets the remote YuNet tracker, NOT
-        // the gateway vision (explain) URL. Keeps the tracking loop off the
-        // photo/Explain path entirely. (Empty string -> falls back to explain.)
-        ESP_LOGI(TAG, "Frame push tracking url: %s", CONFIG_STACKCHAN_TRACKING_URL);
-        camera_->SetTrackingUrl(CONFIG_STACKCHAN_TRACKING_URL);
-#endif
     }
 
     bool servo_ok_ = false;
@@ -6283,61 +6272,6 @@ private:
         ESP_LOGI(TAG, "StackChan MCP tools registered");
     }
 
-    // ---- On-device face tracking (optional, esp-dl) -----------------------
-    // Additive Reachy-style face-tracking offset blended into the head's boot
-    // neutral pose (BOOT_INIT_YAW_DEG / BOOT_INIT_PITCH_DEG). Uses the
-    // WriteHeadAngles speed_dps overload so each staged target is sized from
-    // the actual move delta, keeping the ServoTask interpolation smooth.
-    // CONFIG_STACKCHAN_FACE_TRACKING=n compiles the whole feature out.
-    static constexpr int FACE_TRACK_SPEED_DPS = 90;  // above MIN_SMOOTH floor (72) for smooth tracking motion
-
-    void StartFaceTracking() {
-#if CONFIG_STACKCHAN_FACE_TRACKING
-        if (face_tracking_ != nullptr) {
-            ESP_LOGW(TAG, "StartFaceTracking: already running");
-            return;
-        }
-        if (camera_ == nullptr) {
-            ESP_LOGW(TAG, "StartFaceTracking: no camera initialized");
-            return;
-        }
-        if (!servo_ok_ || motion_driver_ == nullptr) {
-            ESP_LOGW(TAG, "StartFaceTracking skipped: servo not initialized");
-            return;
-        }
-        face_tracking_ = std::make_unique<FaceTracking>(
-            camera_,
-            [this](int yaw_off_deg, int pitch_off_deg) {
-                WriteHeadAngles(BOOT_INIT_YAW_DEG + yaw_off_deg,
-                                BOOT_INIT_PITCH_DEG + pitch_off_deg,
-                                FACE_TRACK_SPEED_DPS);
-            });
-        if (!face_tracking_->Start()) {
-            ESP_LOGE(TAG, "StartFaceTracking: task start failed");
-            face_tracking_.reset();
-            return;
-        }
-        ESP_LOGI(TAG, "Face tracking started (esp-dl)");
-#else
-        ESP_LOGW(TAG, "StartFaceTracking: compiled out (CONFIG_STACKCHAN_FACE_TRACKING=n)");
-#endif
-    }
-
-    void StopFaceTracking() {
-        if (face_tracking_ == nullptr) {
-            return;
-        }
-        face_tracking_->Stop();
-        face_tracking_.reset();
-        ESP_LOGI(TAG, "Face tracking stopped");
-    }
-
-    void SetFaceTrackingEnabled(bool enabled) {
-        if (face_tracking_ != nullptr) {
-            face_tracking_->SetEnabled(enabled);
-        }
-    }
-
 public:
     StackChanBoard() {
         InitializePowerSaveTimer();
@@ -6360,11 +6294,6 @@ public:
         GetBacklight()->RestoreBrightness();
         InitializeIOExpander();
         InitializeServo();
-        // Optional on-device face tracking starts once the servo is at its
-        // boot neutral pose and the camera is streaming. Opt-in via Kconfig.
-#if CONFIG_STACKCHAN_FACE_TRACKING
-        StartFaceTracking();
-#endif
         InitializeSi12tTouch();
         I2cDetect();
         // Avatar auto-display disabled: WiFi config UI needs to be visible.

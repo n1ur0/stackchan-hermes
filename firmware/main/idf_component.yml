@@ -135,23 +135,6 @@ dependencies:
     rules:
     - if: target in [esp32s3, esp32p4]
 
-  ## StackChan on-device face tracking (esp-dl). Fetched for all esp32s3
-  ## targets; actual use is gated by CONFIG_STACKCHAN_FACE_TRACKING in code
-  ## (face_tracking.cc is a no-op stub when disabled) and the .espdl model is
-  ## dropped by the linker when the component isn't referenced, so non-face
-  ## builds are unaffected at flash time. A `$CONFIG{...}==True` manifest rule
-  ## is NOT used here: the component manager cannot resolve top-level Kconfig
-  ## symbols at dependency-resolution time, so a True branch fails the build
-  ## ("Missing required kconfig option after retry").
-  espressif/esp-dl:
-    version: ~3.3.0
-    rules:
-    - if: target in [esp32s3]
-  espressif/human_face_detect:
-    version: 0.5.0
-    rules:
-    - if: target in [esp32s3]
-
   ## Required IDF version
   idf:
     version: '>=5.5.2'
