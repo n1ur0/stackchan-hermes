@@ -88,6 +88,9 @@ class Nerv0xTTSEngine(TTSEngine):
             Model id. Default ``Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice``.
         ``STACKCHAN_TTS_TIMEOUT``
             Request timeout in seconds. Default 60.
+        ``STACKCHAN_TTS_VOICE``
+            Default voice id sent when the caller does not pass one.
+            Unset = no ``voice`` key (server-side default applies).
     """
 
     name = "nerv0x"
@@ -97,6 +100,7 @@ class Nerv0xTTSEngine(TTSEngine):
         url: str | None = None,
         model: str | None = None,
         timeout_seconds: float | None = None,
+        voice: str | None = None,
         transport: Any = None,
     ) -> None:
         """Construct the engine.
@@ -110,6 +114,10 @@ class Nerv0xTTSEngine(TTSEngine):
 
         env_model = os.getenv("STACKCHAN_TTS_MODEL")
         self._model_name = model or env_model or DEFAULT_TTS_MODEL
+
+        self._voice = (
+            voice or os.getenv("STACKCHAN_TTS_VOICE") or ""
+        )
 
         env_timeout = os.getenv("STACKCHAN_TTS_TIMEOUT")
         if timeout_seconds is not None:
@@ -166,7 +174,7 @@ class Nerv0xTTSEngine(TTSEngine):
             "model": self._model_name,
             "input": text,
         }
-        voice = opts.get("voice")
+        voice = opts.get("voice") or self._voice
         if isinstance(voice, str) and voice:
             payload["voice"] = voice
 
