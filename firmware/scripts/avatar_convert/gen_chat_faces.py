@@ -277,8 +277,8 @@ FACES = {
     "surprised": face_surprised,
     "embarrassed": face_embarrassed,
 }
-PARTS = {f"eyes_{n}": (lambda n=n: part_eyes(n)) for n in ("open", "half", "closed")} | {
-    f"mouth_{n}": (lambda n=n: part_mouth(n)) for n in ("closed", "half", "open", "e", "u")
+PARTS = {f"eyes_{n}": (lambda n=n: part_eyes(f"eyes_{n}")) for n in ("open", "half", "closed")} | {
+    f"mouth_{n}": (lambda n=n: part_mouth(f"mouth_{n}")) for n in ("closed", "half", "open", "e", "u")
 }
 
 
