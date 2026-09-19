@@ -2493,9 +2493,9 @@ private:
         const int64_t TOUCH_THRESHOLD_MS = 500;   // 触摸时长阈值，超过500ms视为长按
         const int64_t DEBOUNCE_MS = 300;          // 直前 release から N ms 以内の press は無視
         const int64_t LISTEN_TIMEOUT_MS = 30000;  // listening 状態に N ms 以上滞在で auto stop
-        const int64_t VAD_WARMUP_MS = 500;        // listen 突入直後はポップアップ音の自己拾音で
+        const int64_t VAD_WARMUP_MS = 800;        // listen 突入直後はポップアップ音の自己拾音で
                                                   // VAD が立つことがあるため判定を保留する
-        const int64_t VAD_SILENCE_STOP_MS = 700; // 発話検知後、 無音が N ms 続いたら auto stop
+        const int64_t VAD_SILENCE_STOP_MS = 1200; // 発話検知後、 無音が N ms 続いたら auto stop
 
         auto& app = Application::GetInstance();
         int64_t now_ms = esp_timer_get_time() / 1000;
