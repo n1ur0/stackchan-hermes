@@ -1235,7 +1235,17 @@ private:
         int speed = static_cast<int>(speed_f);
 
         constexpr float kMin = 10.0f;
-        constexpr float kMax = 650.0f;
+        constexpr float kMax = 330.0f;  // was 650.0f — Issue #88 retune.
+        // Aliveness motion retune (2026-09-19): the previous 650.0f cap let
+        // short / high-speed moves map to a stiffness-650 spring, which on a
+        // ±90° travel head collapses small gesture moves into a stiff ~60 ms
+        // snap — mechanical and imperceptible ("stale"). The official M5Stack
+        // reference (m5stack/StackChan motion/servo.h) drives motion with a
+        // critically-damped spring ~stiffness 170 / settling ~0.4 s. Capping
+        // here at 330 keeps the natural 600 ms default move (~162) intact while
+        // halving the stiffness roof, so even speed-driven short moves settle
+        // with a visible, organic ease instead of snapping. damping is derived
+        // (2*sqrt(mass*stiffness)) so it stays critically damped at every k.
         constexpr float kMass = 1.0f;
         float normalized_speed = static_cast<float>(speed) / 1000.0f;
         float stiffness =

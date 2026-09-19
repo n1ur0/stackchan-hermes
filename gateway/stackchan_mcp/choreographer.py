@@ -74,11 +74,16 @@ logger = logging.getLogger(__name__)
 #: per-phase guards below). Set STACKCHAN_CHOREOGRAPHER=0 to disable.
 _ENABLED = os.getenv("STACKCHAN_CHOREOGRAPHER", "1") != "0"
 
-#: Working envelope — small life-cue offsets, safe inside the M5Stack band.
-YAW_SWING_DEG = 7  # lateral "mulling" weave half-width
-YAW_GLANCE_DEG = 6  # welcome glance pan
-PITCH_CONSULT_DEG = 4  # tool consult-tilt
-PITCH_NOD_DEG = 4  # speech nod depth
+#: Working envelope — life-cue offsets sized to StackChan's WIDE servo range.
+#: StackChan's reference servo model (m5stackchan-servo.ts) travels yaw ±90
+#: (practical ±128), pitch 0..90, and its touch-stroke wobble swings ±20°.
+#: Reachy-scale offsets (±4..7°, valid for a big head) are IMPERCEPTIBLE here
+#: (the "stale" complaint) — scale gestures to ~2/3 of the wobble so they read
+#: clearly while staying inside the M5Stack-recommended 5..85° pitch band.
+YAW_SWING_DEG = 16  # lateral "mulling" weave — clearly rocks the head
+YAW_GLANCE_DEG = 14  # welcome glance — an unambiguous turn of the head
+PITCH_CONSULT_DEG = 9  # tool consult-tilt
+PITCH_NOD_DEG = 9  # speech nod — a visible head bob
 YAW_MIN, YAW_MAX = -90, 90
 PITCH_MIN, PITCH_MAX = 5, 85
 

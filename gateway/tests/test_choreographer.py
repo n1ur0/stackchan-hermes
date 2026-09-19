@@ -93,10 +93,11 @@ def test_thinking_pensive_weave():
     faces = [a["face"] for a in _calls_by(ch, "self.display.set_avatar")]
     assert faces[-1] == "thinking"
     moves = _calls_by(ch, "self.robot.set_head_angles")
-    # weave swings to +swing and -swing around home (0/40).
+    # weave swings to +swing and -swing around home (0/40), scaled to
+    # StackChan's wide servo (see YAW_SWING_DEG).
     assert len(moves) >= 4
     yaws = {m["yaw"] for m in moves}
-    assert 7 in yaws and -7 in yaws
+    assert 16 in yaws and -16 in yaws
 
 
 def test_talk_dispatches_mouth_sequence_and_nods():
