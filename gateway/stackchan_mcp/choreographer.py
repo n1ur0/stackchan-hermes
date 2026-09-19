@@ -18,12 +18,16 @@ Design rules (match the codebase, see AGENTS.md):
   must never hold up the turn.
 - **One active choreography at a time.** A single per-gateway background
   task owns the head. Starting a new phase cancels the previous one so we
-  never interleave competing ``set_head_angles`` commands.
-- **Subtle amplitudes.** The head moves are life-cues (±4..8 deg), not
-  theatre. They compose with any other movement without looking frantic,
-  and they never fight an idling hold.
+  never interleave competing device commands.
+- **Motion is continuous, not discrete.** Head motion is rendered as a
+  *continuous additive wave* (``set_head_wave``) in the firmware servo task
+  at 50 Hz, so the head glides along smooth sine curves — the machine
+  analogue of Reachy's ``set_target()`` control loop. We never issue
+  "move then hold" set-point hops, which are exactly what read as robotic /
+  stale on this slow, wide servo (see ``firmware/.../stackchan.cc``
+  ``RenderHeadWave``).
 - **Home-pose safe.** The starting ``(yaw, pitch)`` is read once when the
-  conversation begins and the head is returned to it on release.
+  conversation begins and used as the wave center; it is restored on release.
 - **Mouth lip-sync is sized to the spoken reply.** ``set_mouth_sequence``
   plays locally on the device with per-step timers, so the talking pattern
   is built to span (approximately) the TTS ``duration_ms``. It is not
@@ -38,18 +42,16 @@ Phase map (the "workflow" of one turn):
 =============  ===========================================================
 Phase          Coordinated body language
 =============  ===========================================================
-engage()       listen opened — face idle, blink on, one small welcome
-               glance off home and back (the "noticed you" cue).
-thinking()     LLM working — face ``thinking``, a slow lateral "mulling"
-               weave (±7 deg yaw, 2 cycles), then rest.
-tool_step()    a tool fired — face stays ``thinking``; on the first tool a
-               brief consult-tilt (pitch −4 deg, back) as if checking
-               something. Later tools keep motion muted (status text is
-               the signal).
+engage()       listen opened — face idle, blink on, a gentle continuous sway
+               so the head is alive the moment the turn opens.
+thinking()     LLM working — face ``thinking``, a slow continuous lateral
+               "mulling" weave (±16 deg yaw @ ~0.45 Hz).
+tool_step()    a tool fired — the thinking weave keeps gliding (tools are
+               sub-second; no stepwise flit).
 talk()         reply TTS — face ``happy``, a lip-sync mouth sequence sized
-               to the reply, plus 2–3 small speech-pitch nods.
-release()      turn over / waiting for follow-up — shut off any active
-               motion, restore home pose, face ``idle``, blink on again.
+               to the reply, plus a continuous sway+bob (speech cadence).
+release()      turn over / waiting for follow-up — stop the wave, restore
+               home pose, face ``idle``, blink on again.
 =============  ===========================================================
 
 Env gate: ``STACKCHAN_CHOREOGRAPHER=0`` disables the whole layer.
@@ -80,10 +82,12 @@ _ENABLED = os.getenv("STACKCHAN_CHOREOGRAPHER", "1") != "0"
 #: Reachy-scale offsets (±4..7°, valid for a big head) are IMPERCEPTIBLE here
 #: (the "stale" complaint) — scale gestures to ~2/3 of the wobble so they read
 #: clearly while staying inside the M5Stack-recommended 5..85° pitch band.
-YAW_SWING_DEG = 16  # lateral "mulling" weave — clearly rocks the head
-YAW_GLANCE_DEG = 14  # welcome glance — an unambiguous turn of the head
-PITCH_CONSULT_DEG = 9  # tool consult-tilt
-PITCH_NOD_DEG = 9  # speech nod — a visible head bob
+YAW_SWAY_DEG = 8  # gentle "attentive" sway amplitude (engage + background of talk)
+YAW_SWAY_HZ = 0.6  # sway frequency — slow, breathing, alive
+YAW_SWING_DEG = 16  # thinking "mulling" weave — clearly rocks the head
+YAW_WEAVE_HZ = 0.45  # weave frequency — slow lateral mull
+PITCH_NOD_DEG = 7  # speech bob amplitude — a visible head bob
+PITCH_NOD_HZ = 1.2  # speech bob frequency — conversational cadence
 YAW_MIN, YAW_MAX = -90, 90
 PITCH_MIN, PITCH_MAX = 5, 85
 
@@ -184,6 +188,42 @@ class Choreographer:
         pitch = _clamp(pitch, PITCH_MIN, PITCH_MAX)
         await self._call("self.robot.set_head_angles", {"yaw": yaw, "pitch": pitch})
 
+    async def _start_wave(
+        self,
+        center: tuple[int, int],
+        *,
+        yaw_amp: int,
+        yaw_freq_hz: float,
+        pitch_amp: int = 0,
+        pitch_freq_hz: float = 0.0,
+        yaw_phase_deg: int = 0,
+        pitch_phase_deg: int = 90,
+    ) -> None:
+        """Start a continuous presence wave (fluid, Reachy-style motion).
+
+        The waveform is rendered natively in the firmware servo task (50 Hz),
+        so the head GLIDES along a smooth sine rather than hopping between
+        set-points. ``center`` is the base (home) pose; amplitudes in degrees,
+        frequencies in Hz (converted to milli-Hz for the device schema).
+        """
+        yaw, pitch = center
+        await self._call(
+            "self.robot.set_head_wave",
+            {
+                "center_yaw": _clamp(yaw, YAW_MIN, YAW_MAX),
+                "center_pitch": _clamp(pitch, PITCH_MIN, PITCH_MAX),
+                "yaw_amp": _clamp(yaw_amp, 0, 90),
+                "yaw_freq_mhz": int(round(yaw_freq_hz * 1000.0)),
+                "yaw_phase_deg": yaw_phase_deg,
+                "pitch_amp": _clamp(pitch_amp, 0, 80),
+                "pitch_freq_mhz": int(round(pitch_freq_hz * 1000.0)),
+                "pitch_phase_deg": pitch_phase_deg,
+            },
+        )
+
+    async def _stop_wave(self) -> None:
+        await self._call("self.robot.clear_head_wave", {})
+
     # ---- background task management --------------------------------
 
     def _cancel_active(self) -> None:
@@ -213,24 +253,20 @@ class Choreographer:
             await self._set_blink(True)
             home = self._home
             if home is not None:
-                yaw, pitch = home
-                side = (
-                    1
-                    if (getattr(self._gateway.multiturn, "turn_count", 1) % 2 == 0)
-                    else -1
+                # Continuous gentle sway = "coming alive / attentive"; no
+                # discrete one-shot move (discretes are what felt robotic).
+                await self._start_wave(
+                    home,
+                    yaw_amp=YAW_SWAY_DEG,
+                    yaw_freq_hz=YAW_SWAY_HZ,
                 )
-                await self._move_head(
-                    _clamp(yaw + YAW_GLANCE_DEG * side, YAW_MIN, YAW_MAX), pitch
-                )
-                await asyncio.sleep(1.0)
-                await self._move_head(yaw, pitch)
             else:
                 await asyncio.sleep(0.6)
 
         self._spawn(_body())
 
     def thinking(self) -> None:
-        """LLM is working — pensive lateral weave behind ``Thinking...``."""
+        """LLM is working — slow lateral mulling weave behind ``Thinking...``."""
         if not _enabled():
             return
 
@@ -240,45 +276,46 @@ class Choreographer:
             if home is None:
                 await asyncio.sleep(0.5)
                 return
-            yaw, pitch = home
-            try:
-                for _ in range(2):
-                    for side in (1, -1):
-                        await self._move_head(
-                            _clamp(yaw + YAW_SWING_DEG * side, YAW_MIN, YAW_MAX),
-                            pitch,
-                        )
-                        await asyncio.sleep(1.1)
-            except asyncio.CancelledError:
-                logger.debug("choreographer: thinking weave cancelled")
-                raise
+            await self._start_wave(
+                home,
+                yaw_amp=YAW_SWING_DEG,
+                yaw_freq_hz=YAW_WEAVE_HZ,
+            )
 
         self._spawn(_body())
 
     def tool_step(self, *, is_first: bool) -> None:
-        """A Hermes tool fired — subtle consult-tilt on the first one only."""
-        if not _enabled() or not is_first:
+        """A Hermes tool fired — keep the mulling weave going (fluid).
+
+        Discrete consultation tilts were removed: a brief tilt is exactly the
+        stepwise motion that read as robotic, and firing a new wave config per
+        tool churn would make the head flit. The continuous thinking weave
+        already provides presence while tool steps run (tens to hundreds of ms),
+        so this method just re-asserts it and is otherwise a no-op.
+        """
+        if not _enabled():
             return
 
         async def _body() -> None:
             home = self._home or await self._read_home()
             if home is None:
                 return
-            yaw, pitch = home
-            await self._move_head(
-                yaw, _clamp(pitch - PITCH_CONSULT_DEG, PITCH_MIN, PITCH_MAX)
+            await self._start_wave(
+                home,
+                yaw_amp=YAW_SWING_DEG,
+                yaw_freq_hz=YAW_WEAVE_HZ,
             )
-            await asyncio.sleep(0.5)
-            await self._move_head(yaw, pitch)
 
+        # Re-assert the weave but do NOT cancel an ongoing wave mid-turn.
         self._spawn(_body())
 
     def talk(self, duration_ms: int) -> None:
-        """Reply is about to play — happy face + sized lip-sync + small nods.
+        """Reply is about to play — happy face + sized lip-sync + fluid bob.
 
         ``duration_ms`` comes from the TTS result so the mouth roughly spans
-        the spoken reply (see module docstring re: lip-sync being
-        approximate by design).
+        the spoken reply (see module docstring re: lip-sync being approximate
+        by design). The head rides a continuous sway+bob wave so speech motion
+        glides rather than hopping in discrete nodes.
         """
         if not _enabled():
             return
@@ -289,33 +326,25 @@ class Choreographer:
             if steps:
                 await self._call("self.display.set_mouth_sequence", {"steps": steps})
             home = self._home or await self._read_home()
-            budget_s = max(0.0, (duration_ms / 1000.0) - 0.4)  # leave a tail
-            if home is not None and budget_s > 0:
-                yaw, pitch = home
-                try:
-                    # interval = one nod up+down; do 2-3 gentle ones.
-                    period = min(1.8, max(0.9, budget_s / 3.0))
-                    start = asyncio.get_running_loop().time()
-                    while (asyncio.get_running_loop().time() - start) < budget_s:
-                        await self._move_head(
-                            yaw, _clamp(pitch - PITCH_NOD_DEG, PITCH_MIN, PITCH_MAX)
-                        )
-                        await asyncio.sleep(period / 2.0)
-                        await self._move_head(yaw, pitch)
-                        await asyncio.sleep(period / 2.0)
-                except asyncio.CancelledError:
-                    logger.debug("choreographer: speech nods cancelled")
-                    await self._move_head(yaw, pitch)
-                    raise
+            if home is not None:
+                await self._start_wave(
+                    home,
+                    yaw_amp=YAW_SWAY_DEG,
+                    yaw_freq_hz=YAW_SWAY_HZ,
+                    pitch_amp=PITCH_NOD_DEG,
+                    pitch_freq_hz=PITCH_NOD_HZ,
+                    pitch_phase_deg=30,
+                )
 
         self._spawn(_body())
 
     def release(self, *, happy: bool = False) -> None:
-        """End of turn / waiting for a follow-up — settle to home, idle face."""
+        """End of turn / waiting for a follow-up — stop motion, idle face."""
         if not _enabled():
             return
 
         async def _body() -> None:
+            await self._stop_wave()
             await self._set_face("happy" if happy else "idle")
             await self._set_blink(True)
             home = self._home

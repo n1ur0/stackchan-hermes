@@ -6,6 +6,9 @@ import json
 from stackchan_mcp.choreographer import (
     Choreographer,
     _talking_steps,
+    YAW_SWAY_DEG,
+    YAW_SWING_DEG,
+    PITCH_NOD_DEG,
 )
 
 
@@ -75,32 +78,38 @@ def test_talking_steps_zero_and_negative():
 # ---- whole-phase flows ----------------------------------------------
 
 
-def test_engage_welcome_glance():
+def test_engage_starts_gentle_sway():
     ch = Choreographer(FakeGateway())
     run_phase(ch, "engage")
     faces = [a["face"] for a in _calls_by(ch, "self.display.set_avatar")]
     assert faces[-1] == "idle"
     assert _calls_by(ch, "self.display.set_blink") == [{"enabled": True}]
-    # engage read home, stood at home + glance, then returned to home.
-    moves = _calls_by(ch, "self.robot.set_head_angles")
-    assert len(moves) >= 2
-    assert moves[-1] == {"yaw": 0, "pitch": 40}  # lands back at home
+    waves = _calls_by(ch, "self.robot.set_head_wave")
+    assert len(waves) == 1
+    w = waves[0]
+    # centered on home, gentle continuous sway — no discrete set-point hops.
+    assert w["center_yaw"] == 0 and w["center_pitch"] == 40
+    assert w["yaw_amp"] == YAW_SWAY_DEG
+    assert w["yaw_freq_mhz"] > 0
+    assert _calls_by(ch, "self.robot.set_head_angles") == []
 
 
-def test_thinking_pensive_weave():
+def test_thinking_starts_mulling_weave():
     ch = Choreographer(FakeGateway())
     run_phase(ch, "thinking")
     faces = [a["face"] for a in _calls_by(ch, "self.display.set_avatar")]
     assert faces[-1] == "thinking"
-    moves = _calls_by(ch, "self.robot.set_head_angles")
-    # weave swings to +swing and -swing around home (0/40), scaled to
-    # StackChan's wide servo (see YAW_SWING_DEG).
-    assert len(moves) >= 4
-    yaws = {m["yaw"] for m in moves}
-    assert 16 in yaws and -16 in yaws
+    waves = _calls_by(ch, "self.robot.set_head_wave")
+    assert len(waves) == 1
+    w = waves[0]
+    # weave amplitude scaled to StackChan's wide servo (YAW_SWING_DEG=16).
+    assert w["yaw_amp"] == YAW_SWING_DEG
+    assert w["center_yaw"] == 0 and w["center_pitch"] == 40
+    assert w["yaw_freq_mhz"] > 0
+    assert _calls_by(ch, "self.robot.set_head_angles") == []
 
 
-def test_talk_dispatches_mouth_sequence_and_nods():
+def test_talk_dispatches_mouth_sequence_and_speech_wave():
     ch = Choreographer(FakeGateway())
     run_phase(ch, "talk", 900)
     faces = [a["face"] for a in _calls_by(ch, "self.display.set_avatar")]
@@ -108,19 +117,24 @@ def test_talk_dispatches_mouth_sequence_and_nods():
     mouth = _calls_by(ch, "self.display.set_mouth_sequence")
     assert mouth and "steps" in mouth[0]
     assert len(mouth[0]["steps"]) > 0
-    moves = _calls_by(ch, "self.robot.set_head_angles")
-    # speech nods dip pitch below home then return.
-    assert any(m["pitch"] < 40 for m in moves)
+    waves = _calls_by(ch, "self.robot.set_head_wave")
+    assert len(waves) == 1
+    w = waves[0]
+    # continuous sway + speech bob around home — no discrete nodes.
+    assert w["yaw_amp"] == YAW_SWAY_DEG
+    assert w["pitch_amp"] == PITCH_NOD_DEG
+    assert w["center_yaw"] == 0 and w["center_pitch"] == 40
+    assert _calls_by(ch, "self.robot.set_head_angles") == []
 
 
-def test_tool_step_only_first_tilts():
-    ch = Choreographer(FakeGateway())
-    run_phase(ch, "tool_step", is_first=True)
-    assert _calls_by(ch, "self.robot.set_head_angles")  # one consult-tilt
-
-    ch2 = Choreographer(FakeGateway())
-    run_phase(ch2, "tool_step", is_first=False)
-    assert _calls_by(ch2, "self.robot.set_head_angles") == []
+def test_tool_step_reasserts_weave_for_any_tool():
+    for is_first in (True, False):
+        ch = Choreographer(FakeGateway())
+        run_phase(ch, "tool_step", is_first=is_first)
+        waves = _calls_by(ch, "self.robot.set_head_wave")
+        assert len(waves) == 1
+        assert waves[0]["yaw_amp"] == YAW_SWING_DEG
+        assert _calls_by(ch, "self.robot.set_head_angles") == []
 
 
 def test_release_restores_home_and_idle():
@@ -130,6 +144,7 @@ def test_release_restores_home_and_idle():
     faces = [a["face"] for a in _calls_by(ch, "self.display.set_avatar")]
     assert faces[-1] == "idle"
     assert _calls_by(ch, "self.display.set_blink") == [{"enabled": True}]
+    assert _calls_by(ch, "self.robot.clear_head_wave")  # one stop
     moves = _calls_by(ch, "self.robot.set_head_angles")
     assert moves[-1] == {"yaw": 10, "pitch": 40}
 
