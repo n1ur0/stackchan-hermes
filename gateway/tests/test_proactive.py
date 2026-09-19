@@ -1,11 +1,11 @@
 """Tests for the proactive speaker (Hermes autonomous judgment layer).
 
-The speaker is driven through :meth:`ProactiveSpeaker.on_state_change`
-with patched clocks and stubbed Hermes/TTS so no real HTTP, ESP32 or
-asyncio sleep is involved. The central regression guarded here is that a
-startup ``UNKNOWN→ACTIVE`` never speaks, and that every heartbeat-style
-suppression (voice turn, audio lock, quiet hours, cooldown, daily cap,
-recording, multi-turn gap) plus the per-transition refire cooldown holds.
+The speaker is driven through :meth:`ProactiveSpeaker.on_state_change` with
+patched clocks and stubbed Hermes/TTS so no real HTTP, ESP32 or asyncio sleep
+is involved. Central regressions: startup ``UNKNOWN→ACTIVE`` never speaks, and
+every heartbeat-style suppression (voice turn, audio lock, quiet hours,
+cooldown, daily cap, recording, multi-turn gap) plus the per-transition refire
+cooldown holds.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import json
 import pytest
 
 from stackchan_mcp import proactive
+from stackchan_mcp.heartbeat import parse_quiet_hours
 from stackchan_mcp.presence import PresenceState
 from stackchan_mcp.proactive import ProactiveConfig, ProactiveSpeaker
 
@@ -52,12 +53,13 @@ class FakeSession:
         return self._stale
 
 
+NIGHT = parse_quiet_hours("22:00-06:30")
+
+
 @pytest.fixture(autouse=True)
 def _proactive_state_path(monkeypatch, tmp_path):
     # Keep from_env's default path off the real home dir.
-    monkeypatch.setenv(
-        "STACKCHAN_PROACTIVE_STATE", str(tmp_path / "proactive_state.json")
-    )
+    monkeypatch.setenv("STACKCHAN_PROACTIVE_STATE", str(tmp_path / "proactive_state.json"))
 
 
 def make_speaker(gateway=None, *, tmp_path=None, **config_kw) -> ProactiveSpeaker:
@@ -116,11 +118,27 @@ def install_stubs(
         return {"ok": False, "error": f"preset '{name}' not found"}
 
     monkeypatch.setattr("stackchan_mcp.hermes_bridge.ask_hermes", fake_ask)
-    monkeypatch.setattr(
-        "stackchan_mcp.tts.orchestrator.synthesize_and_send", fake_synth
-    )
+    monkeypatch.setattr("stackchan_mcp.tts.orchestrator.synthesize_and_send", fake_synth)
     monkeypatch.setattr("stackchan_mcp.control.apply_preset", fake_apply)
     return rec
+
+
+def make_rig(
+    monkeypatch, tmp_path, *, connected=True, reply="welcome back", stubs=None, **config_kw
+):
+    """Build gateway + speaker + recorder in one go (one scaffolding call)."""
+    gw = FakeGateway(connected=connected)
+    speaker = make_speaker(gw, tmp_path=tmp_path, **config_kw)
+    stub_kw = dict(stubs or {})
+    stub_kw.setdefault("reply", reply)
+    return gw, speaker, install_stubs(monkeypatch, **stub_kw)
+
+
+async def rig_fire(monkeypatch, tmp_path, *, old=PresenceState.ABSENT, new=PresenceState.ACTIVE, **kw):
+    """make_rig + fire on_state_change as one call for single-shot tests."""
+    gw, speaker, rec = make_rig(monkeypatch, tmp_path, **kw)
+    await speaker.on_state_change(old, new)
+    return gw, speaker, rec
 
 
 def faces(gw: FakeGateway) -> list[str]:
@@ -139,16 +157,13 @@ def test_from_env_builds_when_enabled(monkeypatch):
     monkeypatch.setenv("STACKCHAN_PROACTIVE", "1")
     speaker = ProactiveSpeaker.from_env(FakeGateway())
     assert speaker is not None
-    assert speaker._config.enabled_transitions == {
-        "absent_active",
-        "quiet_active",
-        "active_quiet",
-    }
-    assert speaker._config.max_per_day == 4
+    cfg = speaker._config
+    assert cfg.enabled_transitions == {"absent_active", "quiet_active", "active_quiet"}
+    assert cfg.max_per_day == 4
     # Default mode presets match the dashboard cards the user saves.
-    assert speaker._config.day_preset == "normal"
-    assert speaker._config.night_preset == "sleep"
-    assert speaker._config.mode_switch_delay_s == proactive.DEFAULT_MODE_DELAY_S
+    assert cfg.day_preset == "normal"
+    assert cfg.night_preset == "sleep"
+    assert cfg.mode_switch_delay_s == proactive.DEFAULT_MODE_DELAY_S
 
 
 def test_from_env_parses_transitions(monkeypatch):
@@ -164,10 +179,7 @@ def test_from_env_parses_transitions(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_absent_active_fires(monkeypatch, tmp_path):
-    gw = FakeGateway()
-    speaker = make_speaker(gw, tmp_path=tmp_path)
-    rec = install_stubs(monkeypatch, reply="welcome back")
-    await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
+    gw, speaker, rec = await rig_fire(monkeypatch, tmp_path)
     assert rec["spoken"] == ["welcome back"]
     # The proactive system prompt (not the chat prompt) framed the ask.
     assert rec["asked"][0]["system_prompt"] == proactive.PROACTIVE_SYSTEM_PROMPT
@@ -177,10 +189,7 @@ async def test_absent_active_fires(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_quiet_active_fires(monkeypatch, tmp_path):
-    gw = FakeGateway()
-    speaker = make_speaker(gw, tmp_path=tmp_path)
-    rec = install_stubs(monkeypatch, reply="good morning")
-    await speaker.on_state_change(PresenceState.QUIET, PresenceState.ACTIVE)
+    _, _, rec = await rig_fire(monkeypatch, tmp_path, reply="good morning", old=PresenceState.QUIET)
     assert rec["spoken"] == ["good morning"]
 
 
@@ -188,28 +197,19 @@ async def test_quiet_active_fires(monkeypatch, tmp_path):
 async def test_unknown_active_never_fires(monkeypatch, tmp_path):
     # The startup / reconnect regression: a first reading or a device
     # reconnect lands as UNKNOWN→ACTIVE and must stay silent.
-    gw = FakeGateway()
-    speaker = make_speaker(gw, tmp_path=tmp_path)
-    rec = install_stubs(monkeypatch)
-    await speaker.on_state_change(PresenceState.UNKNOWN, PresenceState.ACTIVE)
+    _, _, rec = await rig_fire(monkeypatch, tmp_path, old=PresenceState.UNKNOWN)
     assert rec["asked"] == []
     assert rec["spoken"] == []
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "old,new",
-    [
-        (PresenceState.ACTIVE, PresenceState.ABSENT),
-        (PresenceState.ABSENT, PresenceState.QUIET),  # not in default set
-        (PresenceState.QUIET, PresenceState.ABSENT),
-    ],
-)
+@pytest.mark.parametrize("old,new", [
+    (PresenceState.ACTIVE, PresenceState.ABSENT),
+    (PresenceState.ABSENT, PresenceState.QUIET),  # not in default set
+    (PresenceState.QUIET, PresenceState.ABSENT),
+])
 async def test_non_target_transitions_do_not_fire(monkeypatch, tmp_path, old, new):
-    gw = FakeGateway()
-    speaker = make_speaker(gw, tmp_path=tmp_path)
-    rec = install_stubs(monkeypatch)
-    await speaker.on_state_change(old, new)
+    _, _, rec = await rig_fire(monkeypatch, tmp_path, old=old, new=new)
     assert rec["asked"] == []
     assert rec["spoken"] == []
     assert rec["modes"] == []
@@ -217,21 +217,15 @@ async def test_non_target_transitions_do_not_fire(monkeypatch, tmp_path, old, ne
 
 @pytest.mark.asyncio
 async def test_disabled_toggle_skips(monkeypatch, tmp_path):
-    gw = FakeGateway()
-    speaker = make_speaker(gw, tmp_path=tmp_path)
-    rec = install_stubs(monkeypatch, enabled=False)
-    await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
+    _, _, rec = await rig_fire(monkeypatch, tmp_path, stubs={"enabled": False})
     assert rec["asked"] == []
     assert rec["spoken"] == []
 
 
 @pytest.mark.asyncio
 async def test_hermes_failure_stays_silent(monkeypatch, tmp_path):
-    gw = FakeGateway()
-    speaker = make_speaker(gw, tmp_path=tmp_path)
-    rec = install_stubs(monkeypatch, ask_raises=True)
+    _, speaker, rec = await rig_fire(monkeypatch, tmp_path, stubs={"ask_raises": True})
     # Must not raise into the monitor's fire-and-forget task.
-    await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
     assert rec["asked"]  # it tried
     assert rec["spoken"] == []  # but nothing was played
     assert speaker._spoken_today() == 0
@@ -245,13 +239,7 @@ async def test_active_quiet_fires_in_quiet_hours_then_mutes(monkeypatch, tmp_pat
     # The night transition lands at the start of the quiet window. It is
     # exempt from the quiet-hours guard (sleep *is* the night greeting),
     # and must speak *before* the muting preset is applied.
-    from stackchan_mcp.heartbeat import parse_quiet_hours
-
-    gw = FakeGateway()
-    speaker = make_speaker(
-        gw, tmp_path=tmp_path, quiet=parse_quiet_hours("22:00-06:30")
-    )
-    rec = install_stubs(monkeypatch, reply="sleep")
+    gw, speaker, rec = make_rig(monkeypatch, tmp_path, quiet=NIGHT, reply="sleep")
     monkeypatch.setattr(speaker, "_now", lambda: dt.time(23, 30))
     await speaker.on_state_change(PresenceState.ACTIVE, PresenceState.QUIET)
     assert rec["spoken"] == ["sleep"]
@@ -268,10 +256,7 @@ async def test_day_transition_applies_mode_before_speaking(monkeypatch, tmp_path
     # Becoming active (return home / morning wake) restores the un-muting
     # day mode *first*, then greets, so the line is never swallowed by a
     # lingering overnight mute.
-    gw = FakeGateway()
-    speaker = make_speaker(gw, tmp_path=tmp_path)
-    rec = install_stubs(monkeypatch, reply="good morning")
-    await speaker.on_state_change(old, PresenceState.ACTIVE)
+    _, _, rec = await rig_fire(monkeypatch, tmp_path, reply="good morning", old=old)
     assert rec["modes"] == ["normal"]
     assert rec["spoken"] == ["good morning"]
     # Un-mute / brighten, a natural beat, then greet.
@@ -282,14 +267,8 @@ async def test_day_transition_applies_mode_before_speaking(monkeypatch, tmp_path
 async def test_active_quiet_blocked_by_voice_turn_keeps_mode(monkeypatch, tmp_path):
     # The mode switch shares the conversation guards: never mute / dim while
     # the household is mid-turn (design principle #1) — both halves skip.
-    from stackchan_mcp.heartbeat import parse_quiet_hours
-
-    gw = FakeGateway()
+    gw, speaker, rec = make_rig(monkeypatch, tmp_path, quiet=NIGHT)
     gw.voice_turn_active = True
-    speaker = make_speaker(
-        gw, tmp_path=tmp_path, quiet=parse_quiet_hours("22:00-06:30")
-    )
-    rec = install_stubs(monkeypatch)
     monkeypatch.setattr(speaker, "_now", lambda: dt.time(23, 30))
     await speaker.on_state_change(PresenceState.ACTIVE, PresenceState.QUIET)
     assert rec["spoken"] == []
@@ -299,10 +278,7 @@ async def test_active_quiet_blocked_by_voice_turn_keeps_mode(monkeypatch, tmp_pa
 @pytest.mark.asyncio
 async def test_mode_apply_failure_does_not_block_greeting(monkeypatch, tmp_path):
     # A missing / failing preset is best-effort: the greeting still plays.
-    gw = FakeGateway()
-    speaker = make_speaker(gw, tmp_path=tmp_path)
-    rec = install_stubs(monkeypatch, reply="welcome back", apply_ok=False)
-    await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
+    _, _, rec = await rig_fire(monkeypatch, tmp_path, stubs={"apply_ok": False})
     assert rec["modes"] == ["normal"]  # it tried
     assert rec["spoken"] == ["welcome back"]  # greeting still plays
 
@@ -311,13 +287,7 @@ async def test_mode_apply_failure_does_not_block_greeting(monkeypatch, tmp_path)
 async def test_hermes_failure_still_applies_night_mode(monkeypatch, tmp_path):
     # Night mode must switch even if Hermes is down — the greeting is the
     # best-effort half, the mode switch is the reliable one.
-    from stackchan_mcp.heartbeat import parse_quiet_hours
-
-    gw = FakeGateway()
-    speaker = make_speaker(
-        gw, tmp_path=tmp_path, quiet=parse_quiet_hours("22:00-06:30")
-    )
-    rec = install_stubs(monkeypatch, ask_raises=True)
+    _, speaker, rec = make_rig(monkeypatch, tmp_path, quiet=NIGHT, stubs={"ask_raises": True})
     monkeypatch.setattr(speaker, "_now", lambda: dt.time(23, 30))
     await speaker.on_state_change(PresenceState.ACTIVE, PresenceState.QUIET)
     assert rec["spoken"] == []  # Hermes down -> stays silent
@@ -327,85 +297,47 @@ async def test_hermes_failure_still_applies_night_mode(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_empty_preset_name_disables_switch(monkeypatch, tmp_path):
     # An empty configured preset name means "greeting only" for that side.
-    gw = FakeGateway()
-    speaker = make_speaker(gw, tmp_path=tmp_path, day_preset="")
-    rec = install_stubs(monkeypatch, reply="welcome back")
-    await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
+    _, _, rec = await rig_fire(monkeypatch, tmp_path, day_preset="")
     assert rec["modes"] == []  # day-mode switch disabled
     assert rec["spoken"] == ["welcome back"]  # greeting still happens
     assert rec["seq"] == ["speak"]  # no mode -> no beat either
 
 
 @pytest.mark.asyncio
-async def test_mode_switch_delay_is_configurable(monkeypatch, tmp_path):
-    gw = FakeGateway()
-    speaker = make_speaker(gw, tmp_path=tmp_path, mode_switch_delay_s=2.0)
-    rec = install_stubs(monkeypatch, reply="welcome back")
-    await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
-    assert rec["delays"] == [2.0]
-    assert rec["seq"] == ["mode:normal", "delay", "speak"]
-
-
-@pytest.mark.asyncio
-async def test_mode_switch_delay_zero_is_immediate(monkeypatch, tmp_path):
-    gw = FakeGateway()
-    speaker = make_speaker(gw, tmp_path=tmp_path, mode_switch_delay_s=0.0)
-    rec = install_stubs(monkeypatch, reply="welcome back")
-    await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
-    assert rec["delays"] == []  # no beat
-    assert rec["seq"] == ["mode:normal", "speak"]
+@pytest.mark.parametrize(("delay_s", "expected_seq"), [
+    (2.0, ["mode:normal", "delay", "speak"]),
+    (0.0, ["mode:normal", "speak"]),
+])
+async def test_mode_switch_delay(monkeypatch, tmp_path, delay_s, expected_seq):
+    _, _, rec = await rig_fire(monkeypatch, tmp_path, mode_switch_delay_s=delay_s)
+    assert rec["delays"] == ([delay_s] if delay_s else [])
+    assert rec["seq"] == expected_seq
 
 
 # ---- guards (design principle #1) ------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_guard_device_disconnected(monkeypatch, tmp_path):
-    gw = FakeGateway(connected=False)
-    speaker = make_speaker(gw, tmp_path=tmp_path)
-    rec = install_stubs(monkeypatch)
-    await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
-    assert rec["spoken"] == []
-
-
-@pytest.mark.asyncio
-async def test_guard_voice_turn_active(monkeypatch, tmp_path):
-    gw = FakeGateway()
-    gw.voice_turn_active = True
-    speaker = make_speaker(gw, tmp_path=tmp_path)
-    rec = install_stubs(monkeypatch)
+@pytest.mark.parametrize("guard", ["disconnected", "voice_turn", "recording"])
+async def test_guards_block_speech(monkeypatch, tmp_path, guard):
+    gw, speaker, rec = make_rig(monkeypatch, tmp_path, connected=guard != "disconnected", stubs={"recording": guard == "recording"})
+    if guard == "voice_turn":
+        gw.voice_turn_active = True
     await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
     assert rec["spoken"] == []
 
 
 @pytest.mark.asyncio
 async def test_guard_audio_pipeline_busy(monkeypatch, tmp_path):
-    gw = FakeGateway()
-    speaker = make_speaker(gw, tmp_path=tmp_path)
-    rec = install_stubs(monkeypatch)
+    gw, speaker, rec = make_rig(monkeypatch, tmp_path)
     async with gw.esp32.tts_lock:
         await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
     assert rec["spoken"] == []
 
 
 @pytest.mark.asyncio
-async def test_guard_recording(monkeypatch, tmp_path):
-    gw = FakeGateway()
-    speaker = make_speaker(gw, tmp_path=tmp_path)
-    rec = install_stubs(monkeypatch, recording=True)
-    await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
-    assert rec["spoken"] == []
-
-
-@pytest.mark.asyncio
 async def test_guard_quiet_hours(monkeypatch, tmp_path):
-    from stackchan_mcp.heartbeat import parse_quiet_hours
-
-    gw = FakeGateway()
-    speaker = make_speaker(
-        gw, tmp_path=tmp_path, quiet=parse_quiet_hours("22:00-06:30")
-    )
-    rec = install_stubs(monkeypatch)
+    gw, speaker, rec = make_rig(monkeypatch, tmp_path, quiet=NIGHT)
     monkeypatch.setattr(speaker, "_now", lambda: dt.time(23, 30))
     await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
     assert rec["spoken"] == []
@@ -432,15 +364,12 @@ async def test_guard_multiturn_continuation(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_guard_recent_interaction_cooldown(monkeypatch, tmp_path):
-    gw = FakeGateway()
-    speaker = make_speaker(gw, tmp_path=tmp_path, cooldown_min=20.0)
-    rec = install_stubs(monkeypatch)
+    gw, speaker, rec = make_rig(monkeypatch, tmp_path, cooldown_min=20.0)
     monkeypatch.setattr(speaker, "_monotonic", lambda: 10_000.0)
-    # 5 minutes ago -> still in cooldown.
+    # 5 minutes ago -> still in cooldown; 25 minutes ago -> past it.
     gw.last_human_interaction_monotonic = 10_000.0 - 5 * 60
     await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
     assert rec["spoken"] == []
-    # 25 minutes ago -> past cooldown.
     gw.last_human_interaction_monotonic = 10_000.0 - 25 * 60
     await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
     assert rec["spoken"] == ["welcome back"]
@@ -448,9 +377,7 @@ async def test_guard_recent_interaction_cooldown(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_guard_daily_cap(monkeypatch, tmp_path):
-    gw = FakeGateway()
-    speaker = make_speaker(gw, tmp_path=tmp_path, max_per_day=1, refire_min=0.0)
-    rec = install_stubs(monkeypatch)
+    _, speaker, rec = make_rig(monkeypatch, tmp_path, max_per_day=1, refire_min=0.0)
     today = dt.date(2026, 6, 22)
     monkeypatch.setattr(speaker, "_today", lambda: today)
     await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
@@ -468,9 +395,7 @@ async def test_guard_daily_cap(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_refire_cooldown(monkeypatch, tmp_path):
-    gw = FakeGateway()
-    speaker = make_speaker(gw, tmp_path=tmp_path, refire_min=10.0, max_per_day=99)
-    rec = install_stubs(monkeypatch)
+    _, speaker, rec = make_rig(monkeypatch, tmp_path, refire_min=10.0, max_per_day=99)
     clock = {"t": 1_000.0}
     monkeypatch.setattr(speaker, "_monotonic", lambda: clock["t"])
     await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
@@ -489,9 +414,7 @@ async def test_refire_cooldown(monkeypatch, tmp_path):
 async def test_refire_is_per_transition_kind(monkeypatch, tmp_path):
     # A morning wake right after a return must not be eaten by the
     # return's refire window — the cooldown is keyed per transition.
-    gw = FakeGateway()
-    speaker = make_speaker(gw, tmp_path=tmp_path, refire_min=10.0, max_per_day=99)
-    rec = install_stubs(monkeypatch)
+    _, speaker, rec = make_rig(monkeypatch, tmp_path, refire_min=10.0, max_per_day=99)
     monkeypatch.setattr(speaker, "_monotonic", lambda: 500.0)
     await speaker.on_state_change(PresenceState.ABSENT, PresenceState.ACTIVE)
     await speaker.on_state_change(PresenceState.QUIET, PresenceState.ACTIVE)

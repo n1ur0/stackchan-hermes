@@ -1,8 +1,4 @@
-"""ESP32 connection manager.
-
-Acts as a WebSocket server that ESP32 connects TO,
-and as an MCP client that sends commands TO the ESP32.
-"""
+"""ESP32 connection manager: WebSocket server the ESP32 connects to, MCP client to it."""
 
 from __future__ import annotations
 
@@ -37,15 +33,13 @@ from .protocol import HelloResponse, make_mcp_message, parse_jsonrpc_response
 
 logger = logging.getLogger(__name__)
 
-# Timeout for waiting for ESP32 responses
-#: Max seconds to wait for an ESP32 WS response to a tools/call
-#: request. ``STACKCHAN_DEVICE_TIMEOUT`` overrides for noisy WiFi links
-#: (weak signal + power-save can spike latency beyond 10 s).
+#: Max seconds to wait for an ESP32 WS response. Overridable for noisy WiFi links.
 RESPONSE_TIMEOUT = float(os.getenv("STACKCHAN_DEVICE_TIMEOUT", "10.0"))
 
 ToolCall = tuple[str, dict[str, Any]]
 ToolCallResult = tuple[Any, dict[str, Any] | None]
 
+# Tool-name prefix → hardware lane for per-peripheral dispatch ordering.
 _TOOL_LANES = {
     "self.robot.": "servo",
     "self.led.": "led",
@@ -66,12 +60,6 @@ def _hardware_lane(tool_name: str) -> str:
     return "default"
 
 
-def _retrieve_future_exception(future: asyncio.Future[Any]) -> None:
-    """Mark a completed Future exception as observed, if it has one."""
-    if future.done() and not future.cancelled():
-        future.exception()
-
-
 class ESP32Connection:
     """Manages a single ESP32 device connection."""
 
@@ -84,16 +72,10 @@ class ESP32Connection:
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._connected = True
         self._initialized = False
-        # Phase 4.5 avatar: pending load_avatar_set calls waiting for the
-        # device's `avatar_set_loaded` reply. Keyed by expected checksum
-        # so that overlapping fetches (different sets) can be discriminated.
+        # Pending avatar_set_fetch calls keyed by expected checksum so
+        # overlapping fetches of different sets can be discriminated.
         self._avatar_set_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
-        # Device-declared WebSocket protocol version (from the hello
-        # message). Defaults to 1, which matches the firmware's default
-        # (firmware/main/protocols/websocket_protocol.h: ``version_ = 1``)
-        # and the audio framing this gateway emits today (raw Opus
-        # payload). v2/v3 add a BinaryProtocol header that this gateway
-        # does not yet wrap — see Issue follow-up to #70.
+        # Device-declared WebSocket protocol version (default 1 = raw Opus).
         self.protocol_version: int = 1
 
     @property
@@ -108,19 +90,17 @@ class ESP32Connection:
         self._request_id += 1
         return self._request_id
 
-    async def send_mcp_request(
-        self, method: str, params: dict[str, Any]
-    ) -> tuple[Any, dict[str, Any] | None]:
-        """Send an MCP request to ESP32 and wait for response.
+    def _require_connected(self) -> None:
+        if not self._connected:
+            raise ConnectionError("ESP32 not connected")
 
-        Returns (result, error).
-        """
+    async def send_mcp_request(self, method: str, params: dict[str, Any]) -> tuple[Any, dict[str, Any] | None]:
+        """Send an MCP request to ESP32 and wait for the response (result, error)."""
         if not self._connected:
             return None, {"code": -32000, "message": "ESP32 not connected"}
 
         req_id = self._next_id()
         message = make_mcp_message(self.session_id, method, params, req_id)
-
         future: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
         self._pending[req_id] = future
 
@@ -136,7 +116,10 @@ class ESP32Connection:
             return None, {"code": -32000, "message": f"Timeout waiting for ESP32 response (method={method})"}
         except Exception as exc:
             self._pending.pop(req_id, None)
-            _retrieve_future_exception(future)
+            # Mark a concurrently-set future exception observed so the loop
+            # does not log "exception was never retrieved".
+            if future.done() and not future.cancelled():
+                future.exception()
             return None, {"code": -32000, "message": f"ESP32 communication error: {exc}"}
 
     async def initialize(self, vision_url: str = "", vision_token: str = "") -> bool:
@@ -151,7 +134,6 @@ class ESP32Connection:
         if error:
             logger.error("ESP32 initialize failed: %s", error)
             return False
-
         logger.info(
             "ESP32 initialized: protocol=%s server=%s",
             result.get("protocolVersion", "?"),
@@ -161,21 +143,15 @@ class ESP32Connection:
         return True
 
     async def discover_tools(self) -> list[dict[str, Any]]:
-        """Discover tools available on ESP32."""
+        """Discover tools available on ESP32 (follows nextCursor pagination)."""
         all_tools: list[dict[str, Any]] = []
         cursor = ""
-
         while True:
-            params: dict[str, Any] = {"cursor": cursor}
-            result, error = await self.send_mcp_request("tools/list", params)
-
+            result, error = await self.send_mcp_request("tools/list", {"cursor": cursor})
             if error:
                 logger.error("tools/list failed: %s", error)
                 break
-
-            tools = result.get("tools", [])
-            all_tools.extend(tools)
-
+            all_tools.extend(result.get("tools", []))
             next_cursor = result.get("nextCursor", "")
             if not next_cursor:
                 break
@@ -185,34 +161,24 @@ class ESP32Connection:
         logger.info("Discovered %d tools on ESP32", len(all_tools))
         return all_tools
 
-    async def call_tool(
-        self, name: str, arguments: dict[str, Any]
-    ) -> tuple[Any, dict[str, Any] | None]:
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> tuple[Any, dict[str, Any] | None]:
         """Call a tool on ESP32."""
-        return await self.send_mcp_request(
-            "tools/call", {"name": name, "arguments": arguments}
-        )
+        return await self.send_mcp_request("tools/call", {"name": name, "arguments": arguments})
 
     async def send_avatar_set_fetch(
-        self,
-        url: str,
-        token: str,
-        mode: str,
-        checksum: str,
-        expected_size: int,
-        timeout: float = 60.0,
+        self, url: str, token: str, mode: str, checksum: str, expected_size: int, timeout: float = 60.0
     ) -> dict[str, Any]:
-        """Send avatar_set_fetch notification and wait for avatar_set_loaded.
+        """Send avatar_set_fetch and wait for the avatar_set_loaded reply.
 
-        Returns the device's reply dict ({ok, checksum, error}). Returns a
-        synthesized {ok: False, error: ...} dict on timeout or send failure.
+        Returns the device's reply dict ({ok, checksum, error}), or a
+        synthesized {ok: False, error: ...} dict on timeout/send failure.
         """
         if not self._connected:
             return {"ok": False, "checksum": checksum, "error": "not_connected"}
 
         future: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
-        # Last-writer-wins on duplicate checksum: cancel the previous waiter
-        # so the same set being re-pushed doesn't strand callers.
+        # Last-writer-wins on duplicate checksum: cancel a prior waiter so a
+        # re-pushed set doesn't strand callers.
         previous = self._avatar_set_waiters.pop(checksum, None)
         if previous is not None and not previous.done():
             previous.cancel()
@@ -228,8 +194,7 @@ class ESP32Connection:
         }
         try:
             await self._ws.send(json.dumps(msg))
-            result = await asyncio.wait_for(future, timeout=timeout)
-            return result
+            return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             self._avatar_set_waiters.pop(checksum, None)
             return {"ok": False, "checksum": checksum, "error": "device_timeout"}
@@ -246,10 +211,7 @@ class ESP32Connection:
         if future is not None and not future.done():
             future.set_result(payload)
         else:
-            logger.warning(
-                "avatar_set_loaded for unknown checksum=%s (no pending waiter)",
-                checksum,
-            )
+            logger.warning("avatar_set_loaded for unknown checksum=%s (no pending waiter)", checksum)
 
     def handle_response(self, payload: dict[str, Any]) -> None:
         """Handle an incoming MCP response from ESP32."""
@@ -260,189 +222,100 @@ class ESP32Connection:
                 future.set_result(payload)
         else:
             # Notification (no id) — log and discard for now
-            method = payload.get("method", "")
-            logger.info("ESP32 notification: %s", method)
+            logger.info("ESP32 notification: %s", payload.get("method", ""))
 
     async def _ws_send(self, payload: bytes | str) -> None:
-        """Send a payload, translating websockets errors to ConnectionError.
+        """Send, translating websockets errors to ConnectionError.
 
-        The ``websockets`` library raises its own exception hierarchy
-        (``ConnectionClosed`` and friends), which is *not* a subclass
-        of the built-in :class:`ConnectionError`. Without translation
-        the orchestrator's ``except ConnectionError`` filter — and the
-        MCP handler's ``except RuntimeError`` filter — would let those
-        errors leak as raw tracebacks into the MCP transport, breaking
-        the say() tool's clean error JSON contract on mid-stream
-        disconnect.
+        The ``websockets`` exceptions are *not* ConnectionError subclasses;
+        without translation a mid-stream disconnect would leak as raw
+        tracebacks past the orchestrator's ``except ConnectionError`` filter.
         """
         try:
             await self._ws.send(payload)
-        except (
-            websockets.exceptions.ConnectionClosed,
-            OSError,
-        ) as exc:
-            # Mark the connection dead so subsequent calls fail fast
-            # rather than each one re-discovering the broken socket.
-            self.disconnect()
+        except (websockets.exceptions.ConnectionClosed, OSError) as exc:
+            self.disconnect()  # fail fast on subsequent calls
             raise ConnectionError(f"WebSocket send failed: {exc}") from exc
 
     async def send_audio_frame(self, opus_frame: bytes) -> None:
-        """Send a single Opus frame to the ESP32 as a WebSocket binary frame.
-
-        The device's ``OnData`` handler (firmware/main/protocols/
-        websocket_protocol.cc) treats every binary frame as an Opus
-        audio payload to feed into its decoder, so this method is the
-        TTS pipeline's egress point.
-        """
-        if not self._connected:
-            raise ConnectionError("ESP32 not connected")
+        """Send a single Opus frame as a WebSocket binary frame (TTS egress)."""
+        self._require_connected()
         await self._ws_send(opus_frame)
 
     async def send_tts_state(self, state: str) -> None:
         """Send a TTS state notification (``start`` / ``stop`` / ...).
 
-        The device's :func:`Application::OnIncomingJson` translates
-        ``{"type":"tts","state":"start"}`` into
-        :data:`kDeviceStateSpeaking`, which is the gate for
-        :func:`OnIncomingAudio` pushing packets into the decode queue
-        (see ``firmware/main/application.cc``). Without bracketing the
-        audio frames in start/stop, the device drops them on the floor
-        and the speaker stays silent — the TTS tool returns success
-        without anything actually playing.
+        Brackets the audio frames so the device enters and exits
+        ``kDeviceStateSpeaking``; without it the frames are dropped.
         """
-        if not self._connected:
-            raise ConnectionError("ESP32 not connected")
-        message = {
-            "session_id": self.session_id,
-            "type": "tts",
-            "state": state,
-        }
-        await self._ws_send(json.dumps(message))
+        self._require_connected()
+        await self._ws_send(json.dumps({"session_id": self.session_id, "type": "tts", "state": state}))
 
     async def send_listen_state(self, state: str, mode: str = "manual") -> None:
         """Send a listen state notification (``start`` / ``stop``).
 
-        Server-driven counterpart to the device's existing
-        :func:`Protocol::SendStartListening` (Issue #91). The
-        firmware's :func:`Application::OnIncomingJson` dispatches
-        ``state: "start"`` to :func:`Application::StartListening` and
-        ``state: "stop"`` to :func:`Application::StopListening`.
-
-        ``mode`` is currently accepted only for ``state="start"`` and is
-        carried on the wire for forward-compatibility — the firmware
-        accepts but ignores it in Phase 1 because
-        :func:`HandleStartListeningEvent` unconditionally enters
-        ``kListeningModeManualStop`` (the gateway controls the stop
-        boundary explicitly).
+        ``mode`` is carried only for ``state=\"start\"``; the firmware
+        accepts but ignores it in Phase 1 (manual stop boundaries).
         """
-        if not self._connected:
-            raise ConnectionError("ESP32 not connected")
-        message: dict[str, Any] = {
-            "session_id": self.session_id,
-            "type": "listen",
-            "state": state,
-        }
+        self._require_connected()
+        message: dict[str, Any] = {"session_id": self.session_id, "type": "listen", "state": state}
         if state == "start":
             message["mode"] = mode
         await self._ws_send(json.dumps(message))
 
     def disconnect(self) -> None:
-        """Mark connection as disconnected."""
+        """Mark connection as disconnected and fail all pending futures."""
         self._connected = False
         self._initialized = False
-        # Cancel all pending futures
         for future in self._pending.values():
             if not future.done():
                 future.set_exception(ConnectionError("ESP32 disconnected"))
         self._pending.clear()
 
+    async def send_json(self, payload: dict) -> None:
+        """Send one JSON object to the device (public for message handlers)."""
+        await self._ws_send(json.dumps(payload, separators=(",", ":")))
+
+    async def close(self) -> None:
+        """Hard-close the underlying WebSocket (used to reject a device)."""
+        await self._ws.close()
+        self._pending.clear()
+
 
 class ESP32Manager:
-    """Manages ESP32 device connections.
-
-    Runs a WebSocket server that ESP32 devices connect to.
-    Currently supports a single device connection.
-    """
+    """Manages ESP32 device connections (currently a single device)."""
 
     def __init__(self, notify_config: NotifyConfig | None = None):
         self._connection: ESP32Connection | None = None
         self._server: Any = None
         self._lock = asyncio.Lock()
         self._notify_config = notify_config or load_notify_config()
-        # Phase E (yorishiro fork): the owning Gateway wires this to
-        # note_human_interaction() so validated touch events feed the
-        # heartbeat's speak cooldown. Optional because the manager is
-        # also constructed standalone in tests.
+        # Optional callbacks wired by the owning Gateway (optional so the
+        # manager stays constructible standalone in tests).
         self.on_human_interaction: Callable[[], None] | None = None
-        # Phase F (yorishiro fork): the owning Gateway wires this to
-        # control.apply_persisted_volume() so the user's chosen volume
-        # is restored once a (re)connected device finishes MCP init.
-        # Optional for the same standalone-test reason as above.
         self.on_device_ready: Callable[[], Awaitable[None]] | None = None
-        # Phase F (yorishiro fork): fired the instant a device-driven
-        # listen capture starts recording (LCD tap / wake word / button),
-        # so the owning Gateway can flash the "I'm listening..." status text
-        # immediately instead of waiting for the recording to finish,
-        # upload, and decode. Wired the same way as on_device_ready.
         self.on_listen_started: Callable[[], Awaitable[None]] | None = None
         self._init_tasks: list[asyncio.Task] = []
         self._vision_url: str = ""
         self._vision_token: str = ""
-        # Per-device serialisation for TTS send sequences. Acquired by
-        # the orchestrator around the entire start → frames → stop
-        # block so concurrent ``say()`` invocations cannot interleave
-        # their Opus frames on the same WebSocket or overlap their
-        # ``tts.start``/``tts.stop`` notifications (which would yank
-        # the firmware out of ``kDeviceStateSpeaking`` mid-utterance
-        # and silently drop the remaining audio). The lock is scoped
-        # to the manager because the manager owns the device today —
-        # if multi-device support lands later, the lock should move
-        # onto :class:`ESP32Connection` instead.
+        # Serialises the whole TTS start → frames → stop block so concurrent
+        # say() calls cannot interleave Opus frames or yank the device out of
+        # kDeviceStateSpeaking mid-utterance. STT capture shares this lock:
+        # the firmware aborts in-flight TTS when listen.start arrives
+        # mid-speaking, so the device audio path is one serialised resource.
         self._tts_lock = asyncio.Lock()
-        # Inbound STT capture (Issue #91) shares the TTS lock rather
-        # than running on a separate one. The firmware's
-        # ``HandleStartListeningEvent`` aborts any in-flight TTS when
-        # a listen.start arrives mid-speaking (state ==
-        # ``kDeviceStateSpeaking`` → ``AbortSpeaking`` →
-        # ``SetListeningMode(kListeningModeManualStop)``), so two
-        # operations on the same device's audio path would
-        # otherwise step on each other: a ``listen()`` could yank a
-        # ``say()`` out of speaking mid-utterance, or a ``say()``
-        # could start streaming TTS frames into the buffer a
-        # concurrent ``listen()`` is capturing. Treating the audio
-        # path as a single resource makes the device's state machine
-        # observable from gateway code; if a full-duplex contract
-        # ever lands later the lock can split again.
         self._listen_lock = self._tts_lock
-        # Device-driven listen capture (= wake word / button / LCD touch
-        # paths on the firmware side that call ToggleChatState /
-        # WakeWordInvoke / StartListening without an MCP-driven
-        # ``listen()`` tool call). When ``_audio_hook_url`` is set, we
-        # open the shared audio_stream recording slot on inbound
-        # ``{"type":"listen","state":"start"}`` and forward the buffered
-        # Opus frames to the hook on the matching ``"stop"`` message.
-        # See :mod:`stackchan_mcp.audio_input_hook` for the rationale
-        # and protocol details.
+        # Device-driven listen capture (wake word / button / LCD touch): on
+        # inbound listen.start open the shared recording slot and on stop
+        # forward the buffered Opus frames to the configured audio hook.
         self._audio_hook_url: str = ""
         self._audio_hook_token: str = ""
-        # session_id (when device-driven listen has the recording slot
-        # open) or None. Storing the session_id rather than a plain bool
-        # lets the per-handler disconnect cleanup confirm it still owns
-        # the recording before tearing it down — otherwise a stale
-        # disconnect can clobber the active buffer of an unrelated
-        # session (e.g., a fresh reconnection or an MCP-driven listen()
-        # that already took the slot).
+        # session_id that owns the device-driven recording slot (or None);
+        # a stale disconnect must not clobber a fresh session's buffer.
         self._device_driven_session_id: str | None = None
         self._tool_lane_locks = {
-            "servo": asyncio.Lock(),
-            "led": asyncio.Lock(),
-            "avatar": asyncio.Lock(),
-            "display": asyncio.Lock(),
-            "audio": asyncio.Lock(),
-            "camera": asyncio.Lock(),
-            "touch": asyncio.Lock(),
-            "status": asyncio.Lock(),
-            "default": asyncio.Lock(),
+            lane: asyncio.Lock()
+            for lane in ("servo", "led", "avatar", "display", "audio", "camera", "touch", "status", "default")
         }
 
     def set_notify_config(self, notify_config: NotifyConfig) -> None:
@@ -459,22 +332,12 @@ class ESP32Manager:
 
     @property
     def tts_lock(self) -> asyncio.Lock:
-        """Per-device lock guarding the TTS send sequence.
-
-        See :attr:`_tts_lock` for the rationale; the orchestrator wraps
-        the start → frames → stop block in ``async with`` on this lock.
-        """
+        """Per-device lock guarding the TTS send sequence (see _tts_lock)."""
         return self._tts_lock
 
     @property
     def listen_lock(self) -> asyncio.Lock:
-        """Per-device lock guarding the STT capture sequence.
-
-        See :attr:`_listen_lock` for the rationale; the orchestrator
-        wraps the entire ``listen.start`` → wait → ``listen.stop``
-        block in ``async with`` on this lock so two concurrent
-        ``listen()`` calls cannot share the inbound recording slot.
-        """
+        """Per-device lock guarding the STT capture sequence (see _tts_lock)."""
         return self._listen_lock
 
     async def start(
@@ -492,25 +355,15 @@ class ESP32Manager:
         self._audio_hook_url = audio_hook_url
         self._audio_hook_token = audio_hook_token
         if audio_hook_url:
-            logger.info(
-                "Device-driven listen capture enabled (audio hook %s)",
-                audio_hook_url,
-            )
+            logger.info("Device-driven listen capture enabled (audio hook %s)", audio_hook_url)
         logger.info("ESP32 WebSocket server starting on ws://%s:%d", host, port)
-        self._server = await websockets.serve(
-            self._handler,
-            host,
-            port,
-            process_request=self._check_auth,
-        )
+        self._server = await websockets.serve(self._handler, host, port, process_request=self._check_auth)
 
     async def stop(self) -> None:
-        """Stop the WebSocket server."""
-        # Cancel any pending initialization tasks
+        """Stop the WebSocket server and cancel pending init tasks."""
         for task in self._init_tasks:
             task.cancel()
         self._init_tasks.clear()
-
         if self._server:
             self._server.close()
             await self._server.wait_closed()
@@ -519,35 +372,104 @@ class ESP32Manager:
     def _check_auth(
         self, connection: ServerConnection, request: websockets.http11.Request
     ) -> None | websockets.http11.Response:
-        """Validate Bearer token.
-
-        websockets 16+ passes (connection, request) to process_request.
-        """
+        """Validate the Bearer token (websockets 16+ process_request)."""
         expected = os.getenv("STACKCHAN_TOKEN") or os.getenv("BEARER_TOKEN")
         if not expected:
             logger.warning("STACKCHAN_TOKEN not set — accepting all connections")
             return None
-
-        auth = request.headers.get("Authorization", "")
-        if auth == f"Bearer {expected}":
+        if request.headers.get("Authorization", "") == f"Bearer {expected}":
             return None
-
         logger.warning("ESP32 auth rejected")
-        return websockets.http11.Response(
-            401, "Unauthorized", websockets.datastructures.Headers()
+        return websockets.http11.Response(401, "Unauthorized", websockets.datastructures.Headers())
+
+    async def _handle_hello(self, connection: ESP32Connection, data: dict[str, Any]) -> None:
+        """Negotiate an incoming device: reject non-MCP, register the connection."""
+        if not data.get("features", {}).get("mcp"):
+            logger.warning("ESP32 does not support MCP, rejecting")
+            await connection.close()
+            return
+
+        # Capture the WS protocol version so callers can decide wire-format
+        # compatibility (raw Opus = v1 only).
+        raw_version = data.get("version", 1)
+        try:
+            connection.protocol_version = int(raw_version)
+        except (TypeError, ValueError):
+            connection.protocol_version = 1
+        if connection.protocol_version != 1:
+            logger.warning(
+                "ESP32 negotiated WebSocket protocol version=%s; the gateway emits raw "
+                "Opus binary frames matching v1 only. TTS calls (say) will be blocked "
+                "at the orchestrator until v2/v3 BinaryProtocol header wrapping is "
+                "implemented",
+                connection.protocol_version,
+            )
+
+        await connection.send_json(
+            HelloResponse(session_id=connection.session_id).model_dump()
         )
+
+        async with self._lock:
+            if self._connection and self._connection.connected:
+                logger.warning("Replacing existing ESP32 connection")
+                self._connection.disconnect()
+            self._connection = connection
+
+        # Init runs detached so the read loop keeps pumping its responses.
+        task = asyncio.create_task(self._init_device(connection, connection.device_id))
+        self._init_tasks.append(task)
+        task.add_done_callback(
+            lambda t: self._init_tasks.remove(t) if t in self._init_tasks else None
+        )
+
+    async def _handle_mcp(self, connection: ESP32Connection, data: dict[str, Any]) -> None:
+        """Deliver an MCP response payload to its pending future."""
+        connection.handle_response(data.get("payload", {}))
+
+    async def _handle_avatar_set_loaded(self, connection: ESP32Connection, data: dict[str, Any]) -> None:
+        """Device reports the result of a load_avatar_set fetch."""
+        connection.handle_avatar_set_loaded(data)
+
+    async def _handle_stackchan_event(self, connection: ESP32Connection, data: dict[str, Any]) -> None:
+        """Forward a device-raised event to the external subscriber hook."""
+        await self._emit_stackchan_event(data)
+
+    async def _handle_listen(self, connection: ESP32Connection, data: dict[str, Any]) -> None:
+        """Device-driven listen start/stop (wake word, button, LCD touch).
+
+        MCP-driven listen() opens its own recording slot, so we only act when
+        the device initiated AND a hook URL is configured to receive the result.
+        """
+        await self._handle_device_listen(data, connection.session_id)
+
+    # Message-type dispatch for the device read loop. Each entry maps one
+    # ``type`` field to its handler; unknown types are logged and skipped.
+    _MESSAGE_HANDLERS: dict[str, Callable[..., Awaitable[None]]] = {
+        "hello": _handle_hello,
+        "mcp": _handle_mcp,
+        "avatar_set_loaded": _handle_avatar_set_loaded,
+        "stackchan-event": _handle_stackchan_event,
+        "listen": _handle_listen,
+    }
+
+    async def _dispatch_message(self, connection: ESP32Connection, data: dict) -> None:
+        """Route one typed JSON message from the ESP32 to its handler."""
+        msg_type = data.get("type", "")
+        handler = self._MESSAGE_HANDLERS.get(msg_type)
+        if handler is None:
+            logger.debug("ESP32 message type=%s (ignored)", msg_type)
+            return
+        await handler(self, connection, data)
 
     async def _handler(self, ws: ServerConnection) -> None:
         """Handle an incoming ESP32 WebSocket connection.
 
-        Architecture: the message read loop runs continuously, dispatching
-        MCP responses to pending futures. Initialization (initialize + tools/list)
-        runs as a separate task so it doesn't block the read loop.
+        The read loop runs continuously, dispatching MCP responses to
+        pending futures; device initialization runs as a separate task so
+        it never blocks this loop.
         """
         session_id = str(uuid.uuid4())
-        device_id = (
-            ws.request.headers.get("Device-Id", "unknown") if ws.request else "unknown"
-        )
+        device_id = ws.request.headers.get("Device-Id", "unknown") if ws.request else "unknown"
         logger.info("ESP32 connecting: device=%s", device_id)
 
         connection = ESP32Connection(ws, session_id)
@@ -556,13 +478,8 @@ class ESP32Manager:
         try:
             async for message in ws:
                 if isinstance(message, bytes):
-                    # Binary = audio frame. Forward to the audio_stream
-                    # module which buffers it for STT capture (Issue
-                    # #91) when a recording slot is open, or discards
-                    # it otherwise. Only protocol v1 is supported on
-                    # the inbound side today; the orchestrator gates
-                    # listen() on protocol_version=1 so v2/v3 frames
-                    # cannot reach this point with recording active.
+                    # Binary = Opus audio frame: buffer for STT capture when a
+                    # slot is open (v1 only; the orchestrator gates listen()).
                     await handle_audio_frame(message, session_id)
                     continue
 
@@ -572,228 +489,105 @@ class ESP32Manager:
                     logger.warning("Invalid JSON from ESP32: %s", str(message)[:100])
                     continue
 
-                msg_type = data.get("type", "")
-
-                if msg_type == "hello":
-                    # ESP32 hello handshake
-                    features = data.get("features", {})
-                    if not features.get("mcp"):
-                        logger.warning("ESP32 does not support MCP, rejecting")
-                        await ws.close()
-                        return
-
-                    # Capture the device's WebSocket protocol version
-                    # so callers (e.g. the TTS pipeline) can decide
-                    # whether their wire format is compatible. The
-                    # firmware accepts raw Opus only on v1; v2/v3 wrap
-                    # the payload in a BinaryProtocol header.
-                    raw_version = data.get("version", 1)
-                    try:
-                        connection.protocol_version = int(raw_version)
-                    except (TypeError, ValueError):
-                        connection.protocol_version = 1
-                    if connection.protocol_version != 1:
-                        logger.warning(
-                            "ESP32 negotiated WebSocket protocol "
-                            "version=%s; the gateway emits raw Opus "
-                            "binary frames matching v1 only. TTS "
-                            "calls (say) will be blocked at the "
-                            "orchestrator until v2/v3 BinaryProtocol "
-                            "header wrapping is implemented",
-                            connection.protocol_version,
-                        )
-
-                    # Send hello response
-                    resp = HelloResponse(session_id=session_id)
-                    await ws.send(resp.model_dump_json())
-
-                    # Register connection
-                    async with self._lock:
-                        if self._connection and self._connection.connected:
-                            logger.warning("Replacing existing ESP32 connection")
-                            self._connection.disconnect()
-                        self._connection = connection
-
-                    # Start initialization as a separate task so the read loop
-                    # continues to pump messages (responses to initialize/tools_list)
-                    task = asyncio.create_task(self._init_device(connection, device_id))
-                    self._init_tasks.append(task)
-                    task.add_done_callback(lambda t: self._init_tasks.remove(t) if t in self._init_tasks else None)
-
-                elif msg_type == "mcp":
-                    # MCP response from ESP32
-                    payload = data.get("payload", {})
-                    connection.handle_response(payload)
-
-                elif msg_type == "avatar_set_loaded":
-                    # Phase 4.5 avatar (saiverse-stackchan-addon): device
-                    # reports the result of a load_avatar_set fetch (see
-                    # docs/intent/stackchan_avatar_pipeline.md §C-3 in
-                    # the SAIVerse repository).
-                    connection.handle_avatar_set_loaded(data)
-
-                elif msg_type == "stackchan-event":
-                    await self._emit_stackchan_event(data)
-
-                elif msg_type == "listen":
-                    # Device-driven listening start/stop notification
-                    # (wake word, button press, LCD touch — anything
-                    # that calls Application::ToggleChatState /
-                    # WakeWordInvoke / StartListening on the firmware
-                    # side). The MCP-driven listen() tool sends the
-                    # same wire format in the reverse direction and
-                    # already opens its own recording slot via the STT
-                    # orchestrator, so we only act when the device
-                    # initiated the capture AND an audio hook URL is
-                    # configured to receive the result. See
-                    # :mod:`stackchan_mcp.audio_input_hook` for the
-                    # forwarding pipeline.
-                    state = data.get("state", "")
-                    if state == "start":
-                        if not self._audio_hook_url:
-                            logger.debug(
-                                "device-driven listen.start session=%s "
-                                "ignored (STACKCHAN_AUDIO_HOOK_URL not "
-                                "configured)",
-                                session_id,
-                            )
-                        elif is_recording():
-                            # An MCP-driven listen() already owns the
-                            # recording slot; let it complete rather
-                            # than corrupting its buffer.
-                            logger.debug(
-                                "device-driven listen.start session=%s "
-                                "ignored (MCP-driven recording active)",
-                                session_id,
-                            )
-                        else:
-                            start_recording(session_id)
-                            self._device_driven_session_id = session_id
-                            logger.info(
-                                "device-driven listen started: "
-                                "session=%s mode=%s",
-                                session_id, data.get("mode", ""),
-                            )
-                            # Phase F (yorishiro fork): flash "I'm listening..."
-                            # at the earliest possible moment — the
-                            # instant recording opens — rather than after
-                            # the capture finishes, uploads, and decodes
-                            # (the old path in hermes_bridge). Fire-and-
-                            # forget so the WebSocket read loop never
-                            # blocks on the display round-trip; the hook
-                            # owns its own error handling.
-                            if self.on_listen_started is not None:
-                                asyncio.create_task(
-                                    self._run_listen_started_hook()
-                                )
-                    elif state == "stop":
-                        if self._device_driven_session_id == session_id:
-                            self._device_driven_session_id = None
-                            frames = stop_recording()
-                            logger.info(
-                                "device-driven listen stopped: "
-                                "session=%s frames=%d",
-                                session_id, len(frames),
-                            )
-                            # Push asynchronously so the WebSocket read
-                            # loop is not blocked by the HTTP POST
-                            # round-trip. The task is fire-and-forget;
-                            # failures are logged inside
-                            # push_audio_capture and do not propagate.
-                            asyncio.create_task(
-                                push_audio_capture(
-                                    self._audio_hook_url,
-                                    self._audio_hook_token,
-                                    frames,
-                                    session_id=session_id,
-                                )
-                            )
-                    else:
-                        logger.debug(
-                            "listen message with unknown state=%r "
-                            "session=%s",
-                            state, session_id,
-                        )
-
-                else:
-                    logger.debug("ESP32 message type=%s (ignored)", msg_type)
+                await self._dispatch_message(connection, data)
 
         except websockets.exceptions.ConnectionClosed:
             logger.info("ESP32 disconnected: device=%s", device_id)
         finally:
-            # If the device disconnected mid-capture, drop any partial
-            # buffer rather than letting it leak into the next
-            # connection's recording slot (mirrors the discard logic in
-            # audio_stream.handle_audio_frame for session-mismatched
-            # frames).
-            #
-            # Guard the cleanup by session_id: a stale disconnect must
-            # not tear down the active buffer of an unrelated session
-            # that may have grabbed the recording slot since (a fresh
-            # reconnection or an MCP-driven listen() that took over).
-            # The audio_stream layer also tracks the recording session,
-            # so we double-check via is_recording_session().
-            if self._device_driven_session_id == session_id and (
-                is_recording_session(session_id)
-            ):
+            # Drop a partial device-driven capture on disconnect, guarded by
+            # session_id so a stale disconnect cannot tear down an unrelated
+            # session's recording slot.
+            if self._device_driven_session_id == session_id and is_recording_session(session_id):
                 self._device_driven_session_id = None
                 discarded = stop_recording()
                 if discarded:
                     logger.warning(
-                        "device-driven listen aborted mid-capture: "
-                        "session=%s discarded %d frames",
+                        "device-driven listen aborted mid-capture: session=%s discarded %d frames",
                         session_id, len(discarded),
                     )
             elif self._device_driven_session_id == session_id:
-                # Our handler thought it owned the slot, but audio_stream
-                # disagrees — clear our local flag without tearing down
-                # the slot, then keep going.
+                # Our flag thinks we own the slot but audio_stream disagrees —
+                # clear the flag without tearing down the slot.
                 self._device_driven_session_id = None
             connection.disconnect()
             async with self._lock:
                 if self._connection is connection:
                     self._connection = None
 
+    async def _handle_device_listen(self, data: dict[str, Any], session_id: str) -> None:
+        """Handle a device-driven listen start/stop notification."""
+        state = data.get("state", "")
+        if state == "start":
+            if not self._audio_hook_url:
+                logger.debug(
+                    "device-driven listen.start session=%s ignored (STACKCHAN_AUDIO_HOOK_URL not configured)",
+                    session_id,
+                )
+            elif is_recording():
+                # MCP-driven listen() owns the slot; let it complete.
+                logger.debug(
+                    "device-driven listen.start session=%s ignored (MCP-driven recording active)",
+                    session_id,
+                )
+            else:
+                start_recording(session_id)
+                self._device_driven_session_id = session_id
+                logger.info(
+                    "device-driven listen started: session=%s mode=%s",
+                    session_id, data.get("mode", ""),
+                )
+                # Flash "I'm listening..." at record start, fire-and-forget so
+                # the read loop never blocks on the display round-trip.
+                if self.on_listen_started is not None:
+                    asyncio.create_task(self._run_listen_started_hook())
+        elif state == "stop":
+            if self._device_driven_session_id == session_id:
+                self._device_driven_session_id = None
+                frames = stop_recording()
+                logger.info(
+                    "device-driven listen stopped: session=%s frames=%d",
+                    session_id, len(frames),
+                )
+                # Push asynchronously; failures are logged inside push_audio_capture.
+                asyncio.create_task(
+                    push_audio_capture(
+                        self._audio_hook_url, self._audio_hook_token, frames, session_id=session_id
+                    )
+                )
+        else:
+            logger.debug(
+                "listen message with unknown state=%r session=%s",
+                state, session_id,
+            )
+
     async def _init_device(self, connection: ESP32Connection, device_id: str) -> None:
         """Initialize MCP session with a newly connected device."""
-        if await connection.initialize(
-            vision_url=self._vision_url,
-            vision_token=self._vision_token,
-        ):
+        if await connection.initialize(vision_url=self._vision_url, vision_token=self._vision_token):
             await connection.discover_tools()
-            logger.info(
-                "ESP32 ready: device=%s tools=%d",
-                device_id,
-                len(connection.tools),
-            )
-            # Phase F (yorishiro fork): let the owning Gateway re-apply
-            # persisted state (volume) now the device is fully ready.
-            # Fire-and-forget so a slow/failing hook never stalls the
-            # init task; the callback owns its own error handling.
+            logger.info("ESP32 ready: device=%s tools=%d", device_id, len(connection.tools))
+            # Let the owning Gateway re-apply persisted state (volume);
+            # fire-and-forget so a slow hook never stalls the init task.
             if self.on_device_ready is not None:
                 asyncio.create_task(self._run_device_ready_hook())
         else:
             logger.error("ESP32 MCP initialization failed")
 
-    async def _run_device_ready_hook(self) -> None:
-        """Invoke the on_device_ready callback, never propagating."""
-        callback = self.on_device_ready
+    async def _run_hook(self, callback: Callable[[], Awaitable[None]] | None) -> None:
+        """Invoke an optional async hook, never propagating failures."""
         if callback is None:
             return
         try:
             await callback()
         except Exception:
-            logger.exception("on_device_ready callback failed")
+            logger.exception("gateway hook callback failed")
+
+    async def _run_device_ready_hook(self) -> None:
+        """Invoke the on_device_ready callback, never propagating."""
+        await self._run_hook(self.on_device_ready)
 
     async def _run_listen_started_hook(self) -> None:
         """Invoke the on_listen_started callback, never propagating."""
-        callback = self.on_listen_started
-        if callback is None:
-            return
-        try:
-            await callback()
-        except Exception:
-            logger.exception("on_listen_started callback failed")
+        await self._run_hook(self.on_listen_started)
 
     async def _emit_stackchan_event(self, payload: dict[str, Any]) -> None:
         """Forward a firmware-originated stackchan event to the MCP client."""
@@ -802,22 +596,14 @@ class ESP32Manager:
         duration_ms = payload.get("duration_ms")
         ts = payload.get("ts")
         session_id = payload.get("session_id")
-
         if event_type != "touch":
             logger.warning("Malformed stackchan-event frame: event_type=%r", event_type)
             return
         if subtype not in {"tap", "stroke"}:
             logger.warning("Malformed stackchan-event frame: subtype=%r", subtype)
             return
-        if (
-            isinstance(duration_ms, bool)
-            or not isinstance(duration_ms, int)
-            or duration_ms < 0
-        ):
-            logger.warning(
-                "Malformed stackchan-event frame: duration_ms=%r",
-                duration_ms,
-            )
+        if isinstance(duration_ms, bool) or not isinstance(duration_ms, int) or duration_ms < 0:
+            logger.warning("Malformed stackchan-event frame: duration_ms=%r", duration_ms)
             return
         if isinstance(ts, bool) or not isinstance(ts, int) or ts < 0:
             logger.warning("Malformed stackchan-event frame: ts=%r", ts)
@@ -833,10 +619,7 @@ class ESP32Manager:
                 logger.exception("on_human_interaction callback failed")
 
         config = self._notify_config
-        message = config.messages.get(
-            (event_type, subtype),
-            DEFAULT_MESSAGE_TEMPLATES[(event_type, subtype)],
-        )
+        message = config.messages.get((event_type, subtype), DEFAULT_MESSAGE_TEMPLATES[(event_type, subtype)])
         ts_unix = time.time()
         event_payload = {
             "event_type": event_type,
@@ -847,32 +630,14 @@ class ESP32Manager:
             "ts_unix": ts_unix,
             "session_id": session_id,
         }
-        legacy_params = {
-            "event_type": event_type,
-            "subtype": subtype,
-            "duration_ms": duration_ms,
-            "action": message.action,
-            "ts": ts,
-            "session_id": session_id,
-        }
+        legacy_params = {k: v for k, v in event_payload.items() if k != "ts_unix"}
         logger.info(
             "stackchan-event: %s/%s action=%s duration=%sms ts=%s session=%s",
-            event_type,
-            subtype,
-            message.action,
-            duration_ms,
-            ts,
-            session_id,
+            event_type, subtype, message.action, duration_ms, ts, session_id,
         )
 
-        if not (
-            config.legacy_event_enabled
-            or config.channels_enabled
-            or config.jsonl_enabled
-        ):
-            logger.info(
-                "stackchan-event received and dropped: notification paths disabled"
-            )
+        if not (config.legacy_event_enabled or config.channels_enabled or config.jsonl_enabled):
+            logger.info("stackchan-event received and dropped: notification paths disabled")
             return
 
         from .stdio_server import notify_stackchan_event
@@ -882,27 +647,18 @@ class ESP32Manager:
 
         if config.channels_enabled:
             content = render_template(message.template, event_payload)
-            # Channel notification meta must be all-string per CC binary's
-            # Zod schema (matches public plugins: telegram/discord/imessage
-            # all use string fields like chat_id, message_id, ts in ISO).
+            # Channel meta must be all-string per the CC binary's Zod schema.
             channel_meta = {
-                "event_type": event_type,
-                "subtype": subtype,
-                "duration_ms": str(duration_ms),
-                "action": message.action,
-                "ts": str(ts),
-                "ts_unix": str(ts_unix),
-                "session_id": session_id,
+                k: (str(v) if k in ("duration_ms", "ts", "ts_unix") else v)
+                for k, v in event_payload.items()
             }
             await notify_stackchan_event(
-                "notifications/claude/channel",
-                {"content": content, "meta": channel_meta},
+                "notifications/claude/channel", {"content": content, "meta": channel_meta}
             )
 
         if config.jsonl_enabled:
-            # ``log_event`` swallows OS / permission errors internally; the
-            # broad except below is a second-tier guard so any unforeseen
-            # helper bug cannot break the in-band notification paths above.
+            # log_event swallows OS/permission errors; the broad except is a
+            # second-tier guard so a helper bug cannot break the paths above.
             from .event_log import log_event
 
             try:
@@ -917,126 +673,74 @@ class ESP32Manager:
                     ts_unix=ts_unix,
                 )
             except Exception as exc:  # pragma: no cover - defensive guard
-                logger.warning(
-                    "stackchan-event log persistence raised unexpectedly: %s", exc
-                )
+                logger.warning("stackchan-event log persistence raised unexpectedly: %s", exc)
 
-    async def call_tool(
-        self, name: str, arguments: dict[str, Any]
-    ) -> ToolCallResult:
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolCallResult:
         """Call a tool on the connected ESP32 device."""
         result = await self.call_tools([(name, arguments)])
         return result[0]
 
     async def call_tools(self, calls: Sequence[ToolCall]) -> list[ToolCallResult]:
-        """Call multiple ESP32 tools while preserving per-hardware ordering.
-
-        Existing single-tool callers should continue to use ``call_tool``.
-        This helper is for compound gateway flows that can safely overlap
-        hardware-independent peripherals, such as servo + LEDs + avatar.
-        Calls sharing the same hardware lane are serialized; calls on
-        different lanes are dispatched concurrently.
-        """
+        """Call multiple tools, serialising same-lane calls while overlapping
+        hardware-independent peripherals (servo + LEDs + avatar, etc.)."""
         if not calls:
             return []
         if not self._connection or not self._connection.connected:
-            return [
-                (None, {"code": -32000, "message": "No ESP32 device connected"})
-                for _ in calls
-            ]
+            return [(None, {"code": -32000, "message": "No ESP32 device connected"}) for _ in calls]
         if not self._connection.initialized:
-            return [
-                (None, {"code": -32000, "message": "ESP32 not initialized"})
-                for _ in calls
-            ]
+            return [(None, {"code": -32000, "message": "ESP32 not initialized"}) for _ in calls]
 
         connection = self._connection
         return list(
             await asyncio.gather(
-                *(
-                    self._call_tool_on_connection(connection, name, arguments)
-                    for name, arguments in calls
-                )
+                *(self._call_tool_on_connection(connection, name, arguments) for name, arguments in calls)
             )
         )
 
     async def _call_tool_on_connection(
-        self,
-        connection: ESP32Connection,
-        name: str,
-        arguments: dict[str, Any],
+        self, connection: ESP32Connection, name: str, arguments: dict[str, Any]
     ) -> ToolCallResult:
         lane = _hardware_lane(name)
-        lock = self._tool_lane_locks[lane]
-        async with lock:
+        async with self._tool_lane_locks[lane]:
             if connection is not self._connection or not connection.connected:
                 return None, {"code": -32000, "message": "ESP32 not connected"}
             return await connection.call_tool(name, arguments)
 
     async def send_avatar_set_fetch(
-        self,
-        url: str,
-        token: str,
-        mode: str,
-        checksum: str,
-        expected_size: int,
-        timeout: float = 60.0,
+        self, url: str, token: str, mode: str, checksum: str, expected_size: int, timeout: float = 60.0
     ) -> dict[str, Any]:
         """Forward an avatar_set_fetch to the device and await the reply.
 
-        Phase 4.5 avatar (saiverse-stackchan-addon). Returns a dict with
-        keys {ok, checksum, error}; ok=False is returned with a synthetic
-        error when no device is connected (rather than raising) so the
-        MCP tool surfaces a clean error JSON to the caller.
+        Returns a synthetic {ok: False, error: "no_device"} when no device
+        is connected so the MCP tool surfaces a clean error JSON.
         """
         if not self._connection or not self._connection.connected:
             return {"ok": False, "checksum": checksum, "error": "no_device"}
-        return await self._connection.send_avatar_set_fetch(
-            url, token, mode, checksum, expected_size, timeout
-        )
+        return await self._connection.send_avatar_set_fetch(url, token, mode, checksum, expected_size, timeout)
+
+    def _connection_or_raise(self) -> ESP32Connection:
+        """Return the connected device, raising if none is attached."""
+        conn = self._connection
+        if conn is None or not conn.connected:
+            raise ConnectionError("No ESP32 device connected")
+        return conn
 
     async def send_audio_frame(self, opus_frame: bytes) -> None:
-        """Push a single Opus frame to the connected device.
-
-        Used by the TTS pipeline to deliver synthesised audio. Raises
-        :class:`ConnectionError` if no device is currently attached so
-        the orchestrator can surface a clean error to the MCP client
-        instead of silently dropping audio.
-        """
-        if not self._connection or not self._connection.connected:
-            raise ConnectionError("No ESP32 device connected")
-        await self._connection.send_audio_frame(opus_frame)
+        """Push a single Opus frame to the connected device (TTS pipeline)."""
+        await self._connection_or_raise().send_audio_frame(opus_frame)
 
     async def send_tts_state(self, state: str) -> None:
-        """Send a TTS state notification (``start`` / ``stop`` / ...).
-
-        Required around audio frame egress so the device transitions
-        into ``kDeviceStateSpeaking`` and back; see
-        :meth:`ESP32Connection.send_tts_state` for the full rationale.
-        """
-        if not self._connection or not self._connection.connected:
-            raise ConnectionError("No ESP32 device connected")
-        await self._connection.send_tts_state(state)
+        """Send a TTS state notification; see ESP32Connection.send_tts_state."""
+        await self._connection_or_raise().send_tts_state(state)
 
     async def send_listen_state(self, state: str, mode: str = "manual") -> None:
-        """Send a listen state notification to put the device into /
-        out of listening mode (Issue #91).
-
-        See :meth:`ESP32Connection.send_listen_state` for the wire
-        format and the firmware-side dispatch.
-        """
-        if not self._connection or not self._connection.connected:
-            raise ConnectionError("No ESP32 device connected")
-        await self._connection.send_listen_state(state, mode=mode)
+        """Send a listen state notification; see ESP32Connection.send_listen_state."""
+        await self._connection_or_raise().send_listen_state(state, mode=mode)
 
     def get_status(self) -> dict[str, Any]:
         """Get current connection status."""
         if not self._connection or not self._connection.connected:
-            return {
-                "connected": False,
-                "device_id": None,
-                "tools_count": 0,
-            }
+            return {"connected": False, "device_id": None, "tools_count": 0}
         return {
             "connected": True,
             "device_id": self._connection.device_id,

@@ -39,8 +39,10 @@ Design:
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 from typing import Any
+
+from .statefile import fmt_epoch, ts_unix_of
 
 #: Fixed JST offset (no DST), used only for the hour-of-day buckets and
 #: the human-readable timestamps. Injected into :func:`build_report` so
@@ -78,8 +80,7 @@ PRESENT_STATES = ("active", "quiet")
 
 def _fmt(ts: float, tz: timezone, *, with_date: bool = True) -> str:
     """Format an epoch second in the given tz for human display."""
-    dt = datetime.fromtimestamp(ts, tz)
-    return dt.strftime("%Y-%m-%d %H:%M:%S" if with_date else "%m-%d %H:%M:%S")
+    return fmt_epoch(ts, tz, "%Y-%m-%d %H:%M:%S" if with_date else "%m-%d %H:%M:%S")
 
 
 def _stats(vals: list[float]) -> dict[str, Any]:
@@ -115,12 +116,7 @@ def _clamp(v: int, lo: int, hi: int) -> int:
 
 def _sorted_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep only records with a usable numeric ``ts_unix``, sorted by it."""
-    clean = [
-        r
-        for r in records
-        if isinstance(r.get("ts_unix"), (int, float))
-        and not isinstance(r.get("ts_unix"), bool)
-    ]
+    clean = [r for r in records if ts_unix_of(r) is not None]
     clean.sort(key=lambda r: r["ts_unix"])
     return clean
 
@@ -150,7 +146,11 @@ def _sampling(
         "max_gap_s": round(max(gaps), 1) if gaps else 0.0,
         "gaps_over_30s": len(big),
         "outages": [
-            {"at_unix": ts, "at_jst": _fmt(ts, tz, with_date=False), "gap_s": round(g, 1)}
+            {
+                "at_unix": ts,
+                "at_jst": _fmt(ts, tz, with_date=False),
+                "gap_s": round(g, 1),
+            }
             for ts, g in big[:10]
         ],
     }
@@ -180,9 +180,7 @@ def _states(
         if dt > 60:
             dt = median_gap
         time_acc[st] = time_acc.get(st, 0.0) + dt
-        bucket = by_state.setdefault(
-            st, {"hours": 0.0, "ratio": 0.0, "samples": 0}
-        )
+        bucket = by_state.setdefault(st, {"hours": 0.0, "ratio": 0.0, "samples": 0})
         bucket["samples"] += 1
         if prev_state is not None and st != prev_state:
             transitions += 1
@@ -384,7 +382,7 @@ def _recommendation(
 def _hourly(rows: list[dict[str, Any]], tz: timezone) -> list[dict[str, Any]]:
     buckets: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
-        key = datetime.fromtimestamp(r["ts_unix"], tz).strftime("%m-%d %H")
+        key = fmt_epoch(r["ts_unix"], tz, "%m-%d %H")
         buckets.setdefault(key, []).append(r)
     out: list[dict[str, Any]] = []
     for hour in sorted(buckets):
@@ -465,7 +463,9 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines: list[str] = []
     lines.append("# Occupancy Diagnostic Report")
     lines.append("")
-    lines.append(f"- Period: {b['start_jst']} — {b['end_jst']} JST ({b['duration_h']}h)")
+    lines.append(
+        f"- Period: {b['start_jst']} — {b['end_jst']} JST ({b['duration_h']}h)"
+    )
     lines.append(f"- Samples: {b['samples']}   Freshness: {b['stale_s']}s ago")
     lines.append(
         f"- Sample interval: median {s['median_gap_s']}s / max {s['max_gap_s']}s"

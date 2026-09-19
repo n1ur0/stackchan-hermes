@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 import struct
 from typing import Any
 
@@ -154,44 +155,31 @@ def test_pack_opus_frames_multi_page():
     assert audio[2]["granule"] == 120 * GRANULE_PER_FRAME
 
 
-def test_pack_opus_frames_large_packet_lacing():
-    """Packets > 255 bytes are split into 255-byte lacing segments.
+@pytest.mark.parametrize(
+    "packet, expected_segments, expected_body_len",
+    [
+        # 600-byte packet: 255 + 255 + 90 -> 3 segments
+        (bytes(range(256)) * 2 + bytes(range(88)), [255, 255, 90], 600),
+        # exactly-255 packet needs a 0-byte terminator segment
+        (bytes(range(255)), [255, 0], 255),
+    ],
+    ids=["600-byte lacing", "exact-255 terminator"],
+)
+def test_pack_opus_frames_lacing(packet, expected_segments, expected_body_len):
+    """Packets >= 255 bytes are split into 255-byte Ogg lacing segments.
 
     Regression for PR review on #209: ``_build_ogg_page`` rejected any
-    segment over 255 bytes with ``ValueError``, but valid VBR opus
-    frames at higher bitrate can exceed 255 bytes. The packer now
-    splits long packets via ``_packet_to_segments`` before assembling
-    pages.
+    segment over 255 bytes, and packets whose length is an exact
+    multiple of 255 also need a 0-byte terminator so the Ogg decoder
+    does not carry the packet into the next page.
     """
-    # 600-byte packet: 255 + 255 + 90 -> 3 segments
-    long_packet = bytes(range(256)) * 2 + bytes(range(88))
-    assert len(long_packet) == 600
-    blob = pack_opus_frames_to_ogg([long_packet], serial=7)
-    pages = _parse_ogg_pages(blob)
-    # OpusHead + OpusTags + one audio page with 3 segments totalling 600 bytes.
-    audio = [p for p in pages if p["page_seq"] >= 2]
-    assert len(audio) == 1
-    assert audio[0]["segments"] == [255, 255, 90]
-    assert len(audio[0]["body"]) == 600
-
-
-def test_pack_opus_frames_exact_255_boundary():
-    """Packets whose length is an exact multiple of 255 get a 0-byte terminator.
-
-    Regression for PR review on #209: without the terminator the Ogg
-    decoder treats the packet as continuing into the next page, so a
-    standalone 255-byte packet was being mis-framed.
-    """
-    # Exactly 255 bytes -> packet needs a 0-byte terminating segment
-    # so the parser knows it ended on this page.
-    packet_255 = bytes(range(255))
-    blob = pack_opus_frames_to_ogg([packet_255], serial=8)
+    assert len(packet) == sum(expected_segments)
+    blob = pack_opus_frames_to_ogg([packet], serial=7)
     pages = _parse_ogg_pages(blob)
     audio = [p for p in pages if p["page_seq"] >= 2]
     assert len(audio) == 1
-    # One 255-byte segment + one zero-byte terminating segment.
-    assert audio[0]["segments"] == [255, 0]
-    assert len(audio[0]["body"]) == 255
+    assert audio[0]["segments"] == expected_segments
+    assert len(audio[0]["body"]) == expected_body_len
 
 
 def test_pack_opus_frames_crc_matches():
@@ -218,10 +206,32 @@ def test_pack_opus_frames_crc_matches():
 # --- HTTP push --------------------------------------------------------------
 
 
+async def _push_via_hook_server(handle, **kwargs):
+    """Start a throwaway /audio hook server and push_audio_capture against it."""
+    app = web.Application()
+    app.router.add_post("/audio", handle)
+
+    sock = socket.socket()
+    try:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    finally:
+        sock.close()
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    try:
+        return await push_audio_capture(f"http://127.0.0.1:{port}/audio", **kwargs)
+    finally:
+        await runner.cleanup()
+
+
 @pytest.mark.asyncio
-async def test_push_audio_capture_success(aiohttp_unused_port):
-    """A 2xx response from the hook returns True; payload is audio/ogg with
-    Bearer auth and X-StackChan-Session header."""
+async def test_push_audio_capture_success():
+    """A 2xx response returns True; payload is audio/ogg with Bearer
+    auth and X-StackChan-Session header."""
     received: dict[str, Any] = {}
 
     async def handle(request: web.Request) -> web.Response:
@@ -231,24 +241,12 @@ async def test_push_audio_capture_success(aiohttp_unused_port):
         received["body"] = await request.read()
         return web.Response(status=204)
 
-    app = web.Application()
-    app.router.add_post("/audio", handle)
-
-    port = aiohttp_unused_port()
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", port)
-    await site.start()
-
-    try:
-        ok = await push_audio_capture(
-            f"http://127.0.0.1:{port}/audio",
-            token="test-token",
-            frames=[b"\x01\x02\x03"],
-            session_id="sess-abc",
-        )
-    finally:
-        await runner.cleanup()
+    ok = await _push_via_hook_server(
+        handle,
+        token="test-token",
+        frames=[b"\x01\x02\x03"],
+        session_id="sess-abc",
+    )
 
     assert ok is True
     assert received["auth"] == "Bearer test-token"
@@ -270,46 +268,14 @@ async def test_push_audio_capture_empty_frames():
 
 
 @pytest.mark.asyncio
-async def test_push_audio_capture_error_status(aiohttp_unused_port):
+async def test_push_audio_capture_error_status():
     """A 5xx response returns False — caller does not raise."""
 
     async def handle(request: web.Request) -> web.Response:
         await request.read()
         return web.Response(status=500, text="boom")
 
-    app = web.Application()
-    app.router.add_post("/audio", handle)
-
-    port = aiohttp_unused_port()
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", port)
-    await site.start()
-
-    try:
-        ok = await push_audio_capture(
-            f"http://127.0.0.1:{port}/audio",
-            token="",
-            frames=[b"\xaa"],
-            session_id="sess-err",
-        )
-    finally:
-        await runner.cleanup()
-
+    ok = await _push_via_hook_server(
+        handle, token="", frames=[b"\xaa"], session_id="sess-err"
+    )
     assert ok is False
-
-
-@pytest.fixture
-def aiohttp_unused_port():
-    """Helper: pick an unused TCP port via ephemeral bind."""
-    import socket
-
-    def _pick() -> int:
-        sock = socket.socket()
-        try:
-            sock.bind(("127.0.0.1", 0))
-            return sock.getsockname()[1]
-        finally:
-            sock.close()
-
-    return _pick

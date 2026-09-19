@@ -26,6 +26,8 @@ from typing import Any
 
 import aiohttp
 
+from .http import get_json
+
 logger = logging.getLogger(__name__)
 
 JMA_WARNING_URL = "https://www.jma.go.jp/bosai/warning/data/warning/{office}.json"
@@ -156,14 +158,6 @@ def judge_weather(
     return None
 
 
-async def _fetch_json(session: aiohttp.ClientSession, url: str) -> Any:
-    async with session.get(url) as resp:
-        resp.raise_for_status()
-        # JMA serves JSON with a text/plain-ish content type at times;
-        # don't let aiohttp's strict content-type check break us.
-        return await resp.json(content_type=None)
-
-
 async def check_weather(
     office_code: str,
     city_code: str,
@@ -180,10 +174,10 @@ async def check_weather(
     """
     timeout = aiohttp.ClientTimeout(total=FETCH_TIMEOUT_S)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        warning_json = await _fetch_json(
+        warning_json = await get_json(
             session, JMA_WARNING_URL.format(office=office_code)
         )
-        forecast_json = await _fetch_json(
+        forecast_json = await get_json(
             session, JMA_FORECAST_URL.format(office=office_code)
         )
     return judge_weather(

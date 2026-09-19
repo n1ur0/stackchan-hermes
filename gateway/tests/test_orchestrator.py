@@ -12,6 +12,7 @@ from stackchan_mcp.tts.audio_utils import (
     DEVICE_FRAME_DURATION_MS,
     DEVICE_SAMPLE_RATE,
 )
+from tts_fakes import FakeTTSESP32 as _FakeESP32, FakeTTSGateway as _FakeGateway
 
 
 class _PCMEngine(TTSEngine):
@@ -27,33 +28,6 @@ class _PCMEngine(TTSEngine):
         return self._pcm
 
 
-class _FakeESP32:
-    def __init__(self, *, connected: bool = True) -> None:
-        self.device_connected = connected
-        self.frames: list[bytes] = []
-        self.tts_states: list[str] = []
-        # Records the relative order in which audio frames and TTS state
-        # notifications were dispatched, so tests can assert that
-        # ``start`` precedes any frame and ``stop`` trails them.
-        self.events: list[tuple[str, object]] = []
-        # Mirror the production manager's per-device TTS lock so the
-        # orchestrator's ``async with gateway.esp32.tts_lock`` works the
-        # same way under tests as in production. The lock is created
-        # per-fake so each test runs against a fresh instance.
-        self.tts_lock = asyncio.Lock()
-
-    async def send_audio_frame(self, frame: bytes) -> None:
-        self.frames.append(frame)
-        self.events.append(("frame", frame))
-
-    async def send_tts_state(self, state: str) -> None:
-        self.tts_states.append(state)
-        self.events.append(("tts_state", state))
-
-
-class _FakeGateway:
-    def __init__(self, esp32: _FakeESP32) -> None:
-        self.esp32 = esp32
 
 
 @pytest.fixture

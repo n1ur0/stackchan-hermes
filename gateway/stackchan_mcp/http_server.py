@@ -124,6 +124,29 @@ async def _read_json_body(request: Request) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _require_device(gateway: Any) -> JSONResponse | None:
+    """Return a 503 response when no device is connected, else None."""
+    if not gateway.esp32.device_connected:
+        return _control_error("no device connected", status=503)
+    return None
+
+
+def _int_field(body: dict[str, Any], key: str, lo: int, hi: int) -> tuple[int | None, str | None]:
+    """Validate an integer body field in [lo, hi]; (value, None) or (None, error)."""
+    value = body.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or not lo <= value <= hi:
+        return None, f"{key} must be an integer {lo}..{hi}"
+    return value, None
+
+
+def _bool_field(body: dict[str, Any], key: str) -> tuple[bool | None, str | None]:
+    """Validate a boolean body field; (value, None) or (None, error)."""
+    value = body.get(key)
+    if not isinstance(value, bool):
+        return None, f"{key} must be a boolean"
+    return value, None
+
+
 def _control_json(payload: dict[str, Any], *, status: int = 200) -> JSONResponse:
     code = status
     if not payload.get("ok", True) and status == 200:
@@ -587,11 +610,12 @@ def build_app(
 
     async def control_volume(request: Request) -> JSONResponse:
         body = await _read_json_body(request)
-        if not gateway.esp32.device_connected:
-            return _control_error("no device connected", status=503)
-        volume = body.get("volume")
-        if not isinstance(volume, int) or isinstance(volume, bool) or not 0 <= volume <= 100:
-            return _control_error("volume must be an integer 0..100", status=400)
+        if (err := _require_device(gateway)) is not None:
+            return err
+        volume, err = _int_field(body, "volume", 0, 100)
+        if err is not None:
+            return _control_error(err, status=400)
+        assert volume is not None
         return _control_json(await control.set_volume(gateway, volume))
 
     async def control_mic_gain(request: Request) -> JSONResponse:
@@ -599,41 +623,40 @@ def build_app(
         connected = bool(gateway.esp32.device_connected)
         if not connected:
             return _control_error("no device connected", status=503)
-        gain = body.get("gain")
-        if not isinstance(gain, int) or isinstance(gain, bool) or not 0 <= gain <= 36:
-            return _control_error("gain must be an integer 0..36", status=400)
+        gain, err = _int_field(body, "gain", 0, 36)
+        if err is not None:
+            return _control_error(err, status=400)
+        assert gain is not None
         result = await control.set_mic_gain(gateway, gain)
         return _control_json({**result, "connected": connected})
 
     async def control_brightness(request: Request) -> JSONResponse:
         body = await _read_json_body(request)
-        if not gateway.esp32.device_connected:
-            return _control_error("no device connected", status=503)
-        brightness = body.get("brightness")
-        if (
-            not isinstance(brightness, int)
-            or isinstance(brightness, bool)
-            or not 0 <= brightness <= 100
-        ):
-            return _control_error(
-                "brightness must be an integer 0..100", status=400
-            )
+        if (err := _require_device(gateway)) is not None:
+            return err
+        brightness, err = _int_field(body, "brightness", 0, 100)
+        if err is not None:
+            return _control_error(err, status=400)
+        assert brightness is not None
         return _control_json(await control.set_brightness(gateway, brightness))
 
     async def control_led(request: Request) -> JSONResponse:
         body = await _read_json_body(request)
-        if not gateway.esp32.device_connected:
-            return _control_error("no device connected", status=503)
+        if (err := _require_device(gateway)) is not None:
+            return err
         slot = body.get("slot")
         if slot not in control.LED_SLOTS:
             return _control_error(
                 f"slot must be one of {list(control.LED_SLOTS)}", status=400
             )
+        # Missing color channels default to 0 (dashboard sends partial RGB).
+        defaulted = {**body, "r": body.get("r", 0), "g": body.get("g", 0), "b": body.get("b", 0)}
         rgb = {}
         for key in ("r", "g", "b"):
-            val = body.get(key, 0)
-            if not isinstance(val, int) or isinstance(val, bool) or not 0 <= val <= 255:
-                return _control_error(f"{key} must be an integer 0..255", status=400)
+            val, err = _int_field(defaulted, key, 0, 255)
+            if err is not None:
+                return _control_error(err, status=400)
+            assert val is not None
             rgb[key] = val
         on = body.get("on")
         if slot == "idle" and not isinstance(on, bool):
@@ -642,75 +665,66 @@ def build_app(
 
     async def control_led_test(request: Request) -> JSONResponse:
         body = await _read_json_body(request)
-        if not gateway.esp32.device_connected:
-            return _control_error("no device connected", status=503)
+        if (err := _require_device(gateway)) is not None:
+            return err
         slot = body.get("slot")
         if slot not in control.LED_SLOTS:
             return _control_error(
                 f"slot must be one of {list(control.LED_SLOTS)}", status=400
             )
+        assert slot is not None
         return _control_json(await control.preview_led(gateway, slot))
 
     async def control_led_brightness(request: Request) -> JSONResponse:
         body = await _read_json_body(request)
-        if not gateway.esp32.device_connected:
-            return _control_error("no device connected", status=503)
-        brightness = body.get("brightness")
-        if (
-            not isinstance(brightness, int)
-            or isinstance(brightness, bool)
-            or not 0 <= brightness <= 100
-        ):
-            return _control_error(
-                "brightness must be an integer 0..100", status=400
-            )
+        if (err := _require_device(gateway)) is not None:
+            return err
+        brightness, err = _int_field(body, "brightness", 0, 100)
+        if err is not None:
+            return _control_error(err, status=400)
+        assert brightness is not None
         return _control_json(await control.set_led_brightness(gateway, brightness))
 
     async def control_head(request: Request) -> JSONResponse:
         body = await _read_json_body(request)
-        if not gateway.esp32.device_connected:
-            return _control_error("no device connected", status=503)
-        yaw = body.get("yaw")
-        pitch = body.get("pitch")
-        if not isinstance(yaw, int) or isinstance(yaw, bool) or not -90 <= yaw <= 90:
-            return _control_error("yaw must be an integer -90..90", status=400)
-        if (
-            not isinstance(pitch, int)
-            or isinstance(pitch, bool)
-            or not 5 <= pitch <= 85
-        ):
-            return _control_error("pitch must be an integer 5..85", status=400)
+        if (err := _require_device(gateway)) is not None:
+            return err
+        yaw, err = _int_field(body, "yaw", -90, 90)
+        if err is not None:
+            return _control_error(err, status=400)
+        pitch, err = _int_field(body, "pitch", 5, 85)
+        if err is not None:
+            return _control_error(err, status=400)
+        assert yaw is not None and pitch is not None
         return _control_json(await control.set_head_angle(gateway, yaw, pitch))
 
     async def control_neutral_pose(request: Request) -> JSONResponse:
         body = await _read_json_body(request)
-        if not gateway.esp32.device_connected:
-            return _control_error("no device connected", status=503)
-        yaw = body.get("yaw")
-        pitch = body.get("pitch")
-        if not isinstance(yaw, int) or isinstance(yaw, bool) or not -90 <= yaw <= 90:
-            return _control_error("yaw must be an integer -90..90", status=400)
-        if (
-            not isinstance(pitch, int)
-            or isinstance(pitch, bool)
-            or not 5 <= pitch <= 85
-        ):
-            return _control_error("pitch must be an integer 5..85", status=400)
+        if (err := _require_device(gateway)) is not None:
+            return err
+        yaw, err = _int_field(body, "yaw", -90, 90)
+        if err is not None:
+            return _control_error(err, status=400)
+        pitch, err = _int_field(body, "pitch", 5, 85)
+        if err is not None:
+            return _control_error(err, status=400)
+        assert yaw is not None and pitch is not None
         return _control_json(await control.set_neutral_pose(gateway, yaw, pitch))
 
     async def control_mute(request: Request) -> JSONResponse:
         body = await _read_json_body(request)
-        if not gateway.esp32.device_connected:
-            return _control_error("no device connected", status=503)
-        muted = body.get("muted")
-        if not isinstance(muted, bool):
-            return _control_error("muted must be a boolean", status=400)
+        if (err := _require_device(gateway)) is not None:
+            return err
+        muted, err = _bool_field(body, "muted")
+        if err is not None:
+            return _control_error(err, status=400)
+        assert muted is not None
         result = await (control.mute(gateway) if muted else control.unmute(gateway))
         return _control_json(result)
 
     async def control_listen(_request: Request) -> JSONResponse:
-        if not gateway.esp32.device_connected:
-            return _control_error("no device connected", status=503)
+        if (err := _require_device(gateway)) is not None:
+            return err
         result = await control.trigger_listen(gateway)
         if not result.get("ok") and result.get("error") == "already listening":
             return _control_json(result, status=409)
@@ -718,20 +732,17 @@ def build_app(
 
     async def control_proximity(request: Request) -> JSONResponse:
         body = await _read_json_body(request)
-        if not gateway.esp32.device_connected:
-            return _control_error("no device connected", status=503)
+        if (err := _require_device(gateway)) is not None:
+            return err
         mode = body.get("mode")
-        threshold = body.get("threshold")
+        threshold, err = _int_field(body, "threshold", 0, 2047)
         if mode not in ("reflex", "listen", "off"):
             return _control_error(
                 "mode must be one of: reflex, listen, off", status=400
             )
-        if (
-            not isinstance(threshold, int)
-            or isinstance(threshold, bool)
-            or not 0 <= threshold <= 2047
-        ):
-            return _control_error("threshold must be an integer 0..2047", status=400)
+        if err is not None:
+            return _control_error(err, status=400)
+        assert threshold is not None
         content = await _dispatch_mcp_tool(
             "set_proximity_config",
             {"mode": mode, "threshold": threshold},
@@ -744,9 +755,10 @@ def build_app(
         runner = getattr(gateway, "_heartbeat", None)
         if runner is None:
             return _control_error("heartbeat not running", status=503)
-        gestures = body.get("gestures")
-        if not isinstance(gestures, bool):
-            return _control_error("gestures must be a boolean", status=400)
+        gestures, err = _bool_field(body, "gestures")
+        if err is not None:
+            return _control_error(err, status=400)
+        assert gestures is not None
         runner.set_gestures(gestures)
         return _control_json({"ok": True, "gestures": runner.gestures_enabled})
 
@@ -754,9 +766,10 @@ def build_app(
         # Gateway-only state (no device round-trip): pin every voice turn
         # to Hermes when force_hermes is true, else auto-route.
         body = await _read_json_body(request)
-        force = body.get("force_hermes")
-        if not isinstance(force, bool):
-            return _control_error("force_hermes must be a boolean", status=400)
+        force, err = _bool_field(body, "force_hermes")
+        if err is not None:
+            return _control_error(err, status=400)
+        assert force is not None
         return _control_json(control.set_routing_force_hermes(force))
 
     async def control_multiturn(request: Request) -> JSONResponse:
@@ -766,9 +779,10 @@ def build_app(
         # toggle is the runtime source of truth — it overrides the legacy
         # STACKCHAN_MULTITURN env gate.
         body = await _read_json_body(request)
-        enabled = body.get("enabled")
-        if not isinstance(enabled, bool):
-            return _control_error("enabled must be a boolean", status=400)
+        enabled, err = _bool_field(body, "enabled")
+        if err is not None:
+            return _control_error(err, status=400)
+        assert enabled is not None
         return _control_json(control.set_multiturn(enabled))
 
     async def control_proactive(request: Request) -> JSONResponse:
@@ -778,15 +792,16 @@ def build_app(
         # effect on the next transition without a restart. Note it only
         # matters when the speaker exists (STACKCHAN_PROACTIVE env set).
         body = await _read_json_body(request)
-        enabled = body.get("proactive_enabled")
-        if not isinstance(enabled, bool):
-            return _control_error("proactive_enabled must be a boolean", status=400)
-        return _control_json(control.set_proactive_enabled(enabled))
+        proactive_enabled, err = _bool_field(body, "proactive_enabled")
+        if err is not None:
+            return _control_error(err, status=400)
+        assert proactive_enabled is not None
+        return _control_json(control.set_proactive_enabled(proactive_enabled))
 
     async def control_avatar(request: Request) -> JSONResponse:
         body = await _read_json_body(request)
-        if not gateway.esp32.device_connected:
-            return _control_error("no device connected", status=503)
+        if (err := _require_device(gateway)) is not None:
+            return err
         face = body.get("face")
         if face not in CONTROL_AVATAR_FACES:
             return _control_error(
@@ -797,8 +812,8 @@ def build_app(
 
     async def control_say(request: Request) -> JSONResponse:
         body = await _read_json_body(request)
-        if not gateway.esp32.device_connected:
-            return _control_error("no device connected", status=503)
+        if (err := _require_device(gateway)) is not None:
+            return err
         text = body.get("text")
         if not isinstance(text, str) or not text.strip():
             return _control_error("text must be a non-empty string", status=400)
@@ -962,82 +977,45 @@ def build_app(
                 _complete_pending_items_for_shutdown(pending_items)
                 _drain_queued_items_for_shutdown(queue)
 
+    def _route(path: str, endpoint: Any, methods: list[str]) -> Route:
+        return Route(path, endpoint=endpoint, methods=methods)
+
     routes = [
-        Route(
-            "/mcp",
-            endpoint=_StreamableHTTPASGIApp(session_manager),
-            methods=["GET", "POST", "DELETE"],
-        ),
-        Route("/healthz", endpoint=healthz, methods=["GET"]),
-        Route("/status", endpoint=status, methods=["GET"]),
+        _route("/mcp", _StreamableHTTPASGIApp(session_manager), ["GET", "POST", "DELETE"]),
+        _route("/healthz", healthz, ["GET"]),
+        _route("/status", status, ["GET"]),
         # Phase F dashboard control routes (token-guarded by prefix).
-        Route("/control/status", endpoint=control_status, methods=["GET"]),
-        Route("/control/audio_level", endpoint=control_audio_level, methods=["GET"]),
-        Route("/control/conversation", endpoint=control_conversation, methods=["GET"]),
-        Route("/control/presence", endpoint=control_presence, methods=["GET"]),
-        Route(
-            "/control/presence/report",
-            endpoint=control_presence_report,
-            methods=["GET"],
-        ),
-        Route(
-            "/control/presence/config",
-            endpoint=control_presence_config,
-            methods=["POST"],
-        ),
-        Route("/control/activity", endpoint=control_activity, methods=["GET"]),
-        Route("/control/volume", endpoint=control_volume, methods=["POST"]),
-        Route("/control/mic_gain", endpoint=control_mic_gain, methods=["POST"]),
-        Route("/control/brightness", endpoint=control_brightness, methods=["POST"]),
-        Route("/control/led", endpoint=control_led, methods=["POST"]),
-        Route("/control/led_test", endpoint=control_led_test, methods=["POST"]),
-        Route(
-            "/control/led_brightness",
-            endpoint=control_led_brightness,
-            methods=["POST"],
-        ),
-        Route("/control/head", endpoint=control_head, methods=["POST"]),
-        Route(
-            "/control/neutral_pose",
-            endpoint=control_neutral_pose,
-            methods=["POST"],
-        ),
-        Route("/control/mute", endpoint=control_mute, methods=["POST"]),
-        Route("/control/listen", endpoint=control_listen, methods=["POST"]),
-        Route("/control/proximity", endpoint=control_proximity, methods=["POST"]),
-        Route("/control/heartbeat", endpoint=control_heartbeat, methods=["POST"]),
-        Route("/control/routing", endpoint=control_routing, methods=["POST"]),
-        Route("/control/multiturn", endpoint=control_multiturn, methods=["POST"]),
-        Route("/control/proactive", endpoint=control_proactive, methods=["POST"]),
-        Route("/control/avatar", endpoint=control_avatar, methods=["POST"]),
-        Route("/control/say", endpoint=control_say, methods=["POST"]),
-        Route("/control/i2c", endpoint=control_i2c, methods=["POST"]),
-        Route("/control/sensors", endpoint=control_sensors, methods=["GET"]),
-        Route(
-            "/control/sensors/init",
-            endpoint=control_sensors_init,
-            methods=["POST"],
-        ),
-        Route(
-            "/control/presets/list",
-            endpoint=control_presets_list,
-            methods=["GET"],
-        ),
-        Route(
-            "/control/presets/save",
-            endpoint=control_presets_save,
-            methods=["POST"],
-        ),
-        Route(
-            "/control/presets/apply",
-            endpoint=control_presets_apply,
-            methods=["POST"],
-        ),
-        Route(
-            "/control/presets/delete",
-            endpoint=control_presets_delete,
-            methods=["POST"],
-        ),
+        _route("/control/status", control_status, ["GET"]),
+        _route("/control/audio_level", control_audio_level, ["GET"]),
+        _route("/control/conversation", control_conversation, ["GET"]),
+        _route("/control/presence", control_presence, ["GET"]),
+        _route("/control/presence/report", control_presence_report, ["GET"]),
+        _route("/control/presence/config", control_presence_config, ["POST"]),
+        _route("/control/activity", control_activity, ["GET"]),
+        _route("/control/volume", control_volume, ["POST"]),
+        _route("/control/mic_gain", control_mic_gain, ["POST"]),
+        _route("/control/brightness", control_brightness, ["POST"]),
+        _route("/control/led", control_led, ["POST"]),
+        _route("/control/led_test", control_led_test, ["POST"]),
+        _route("/control/led_brightness", control_led_brightness, ["POST"]),
+        _route("/control/head", control_head, ["POST"]),
+        _route("/control/neutral_pose", control_neutral_pose, ["POST"]),
+        _route("/control/mute", control_mute, ["POST"]),
+        _route("/control/listen", control_listen, ["POST"]),
+        _route("/control/proximity", control_proximity, ["POST"]),
+        _route("/control/heartbeat", control_heartbeat, ["POST"]),
+        _route("/control/routing", control_routing, ["POST"]),
+        _route("/control/multiturn", control_multiturn, ["POST"]),
+        _route("/control/proactive", control_proactive, ["POST"]),
+        _route("/control/avatar", control_avatar, ["POST"]),
+        _route("/control/say", control_say, ["POST"]),
+        _route("/control/i2c", control_i2c, ["POST"]),
+        _route("/control/sensors", control_sensors, ["GET"]),
+        _route("/control/sensors/init", control_sensors_init, ["POST"]),
+        _route("/control/presets/list", control_presets_list, ["GET"]),
+        _route("/control/presets/save", control_presets_save, ["POST"]),
+        _route("/control/presets/apply", control_presets_apply, ["POST"]),
+        _route("/control/presets/delete", control_presets_delete, ["POST"]),
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.command_queue = queue

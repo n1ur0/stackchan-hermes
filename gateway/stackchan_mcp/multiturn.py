@@ -37,22 +37,21 @@ Environment variables (all opt-in / tunable):
   its own tail).
 - ``HERMES_SESSION_WINDOW_S`` — Phase 2 context retention. Seconds of
   inactivity after which the next turn starts a *fresh* Hermes
-  conversation (a new ``X-Hermes-Session-Id``). Within the window the
-  turns of one conversation reuse the same id so Hermes keeps context;
-  past it a new tap rotates to a new id so conversations no longer pile
-  into one ever-growing session (the day-spanning accumulation the fixed
-  ``HERMES_SESSION_ID`` caused). Default 180; ``0`` disables rotation and
-  restores the fixed-id behaviour exactly.
+  conversation (a new server-side session via the native Sessions API).
+  Within the window the turns of one conversation reuse the same session
+  so Hermes keeps context; past it a new tap rotates to a new session so
+  conversations no longer pile into one ever-growing session (the
+  day-spanning accumulation the fixed ``X-Hermes-Session-Id`` caused).
+  Default 180; ``0`` disables rotation (one persistent session).
 """
 
 from __future__ import annotations
 
-import os
-import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from . import local_llm
+from .statefile import env_enabled, env_int
 
 #: Reply suffixes that invite a follow-up answer.
 _CONTINUE_SUFFIXES = ("?",)
@@ -68,15 +67,6 @@ DEFAULT_TTS_GUARD_MS = 1000
 DEFAULT_SESSION_WINDOW_S = 180
 
 
-def _env_positive_int(name: str, default: int) -> int:
-    """Parse a positive int env var, falling back to ``default``."""
-    try:
-        value = int(os.getenv(name, ""))
-    except (TypeError, ValueError):
-        return default
-    return value if value > 0 else default
-
-
 def is_enabled() -> bool:
     """True when multi-turn continuation is opted in via the env gate.
 
@@ -86,22 +76,19 @@ def is_enabled() -> bool:
     toggle's initial default (see ``control._default_multiturn``). Kept for
     that default and for tests.
     """
-    return os.getenv("STACKCHAN_MULTITURN", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    return env_enabled("STACKCHAN_MULTITURN")
 
 
 def max_turns() -> int:
     """Ceiling on consecutive auto-continuations in one conversation."""
-    return _env_positive_int("MAX_MULTITURN_TURNS", DEFAULT_MAX_TURNS)
+    return env_int("MAX_MULTITURN_TURNS", DEFAULT_MAX_TURNS, minimum=1)
 
 
 def session_timeout_s() -> float:
     """Seconds of inactivity after which a continuation gap is abandoned."""
-    return float(_env_positive_int("MULTITURN_SESSION_TIMEOUT_S", DEFAULT_SESSION_TIMEOUT_S))
+    return float(
+        env_int("MULTITURN_SESSION_TIMEOUT_S", DEFAULT_SESSION_TIMEOUT_S, minimum=1)
+    )
 
 
 def tts_guard_ms() -> int:
@@ -109,38 +96,19 @@ def tts_guard_ms() -> int:
 
     Zero is allowed (no guard); negative/invalid falls back to the default.
     """
-    raw = os.getenv("MULTITURN_TTS_GUARD_MS", "")
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return DEFAULT_TTS_GUARD_MS
-    return value if value >= 0 else DEFAULT_TTS_GUARD_MS
+    return env_int("MULTITURN_TTS_GUARD_MS", DEFAULT_TTS_GUARD_MS, minimum=0)
 
 
 def session_window_s() -> float:
     """Seconds of inactivity after which the next turn rotates to a fresh
-    Hermes conversation id (Phase 2 context retention).
+    Hermes session (Phase 2 context retention).
 
-    ``0`` is allowed and disables rotation — every turn reuses the fixed
-    ``HERMES_SESSION_ID``, exactly as before. Negative/invalid falls back
-    to the default.
+    ``0`` is allowed and disables rotation — one persistent session,
+    exactly as before. Negative/invalid falls back to the default.
     """
-    raw = os.getenv("HERMES_SESSION_WINDOW_S", "")
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return float(DEFAULT_SESSION_WINDOW_S)
-    return float(value) if value >= 0 else float(DEFAULT_SESSION_WINDOW_S)
-
-
-def new_session_id(base: str) -> str:
-    """Mint a fresh per-conversation Hermes session id under ``base``.
-
-    The configured ``HERMES_SESSION_ID`` is kept as a stable namespace
-    prefix so conversations stay identifiable in Hermes' logs while no
-    longer accumulating into one persistent session.
-    """
-    return f"{base}-{uuid.uuid4().hex[:8]}"
+    return float(
+        env_int("HERMES_SESSION_WINDOW_S", DEFAULT_SESSION_WINDOW_S, minimum=0)
+    )
 
 
 def reply_invites_continuation(reply: str) -> bool:
@@ -163,8 +131,8 @@ class MultiturnSession:
     suppressed forever if the user's answer never arrives, and to decide
     whether the next turn shares the in-flight Hermes conversation id.
 
-    ``session_id`` is the Phase 2 per-conversation Hermes context id
-    (``X-Hermes-Session-Id``). It survives a :meth:`reset` (which only
+    ``session_id`` is the Phase 2 per-conversation Hermes session id
+    (native Sessions API). It survives a :meth:`reset` (which only
     clears the multiturn counter) and rotates purely on the inactivity
     window via :meth:`conversation_id`.
     """
@@ -193,17 +161,22 @@ class MultiturnSession:
         """True when an open continuation gap has outlived ``timeout_s``."""
         return self.turn_count > 0 and (now - self.last_activity) > timeout_s
 
-    def conversation_id(
-        self, *, now: float, window_s: float, mint: Callable[[], str]
+    async def conversation_id(
+        self, *, now: float, window_s: float, mint: Callable[[], Awaitable[str]]
     ) -> str:
-        """Return the Hermes conversation id for a turn starting at ``now``.
+        """Return the server-side Hermes session id for a turn at ``now``.
 
-        Rotates to a fresh ``mint()``-ed id when no conversation is open
-        yet or the gap since the last turn exceeds ``window_s``; within
-        the window the in-flight id is reused so the turns of one
-        conversation share Hermes context. ``window_s == 0`` disables
-        rotation and leaves the id untouched (the caller falls back to the
-        fixed base id).
+        The mint is a callable that creates a *fresh* server session
+        (``POST /api/sessions``); awaiting it gives a real session id
+        that the Hermes server stores conversation context against (the
+        native Sessions API — no ``X-Hermes-Session-Id`` header is
+        involved). Rotation is unchanged: a new session is created when
+        no conversation is open yet or the gap since the last turn
+        exceeds ``window_s``; within the window the in-flight session id
+        is reused so the turns of one conversation share Hermes context.
+        ``window_s == 0`` disables rotation: one session is minted on
+        first use and reused forever (the native API only streams into
+        sessions that exist, so "no rotation" is one persistent session).
 
         Reads ``last_activity`` *before* the caller advances it for this
         turn, so call it at turn entry prior to stamping the new activity.
@@ -211,7 +184,12 @@ class MultiturnSession:
         if window_s > 0 and (
             not self.session_id or (now - self.last_activity) > window_s
         ):
-            self.session_id = mint()
+            self.session_id = await mint()
+        elif window_s == 0 and not self.session_id:
+            # Rotation disabled: mint one session and reuse it forever
+            # (the native API only streams into sessions that exist, so
+            # the "fixed id" behaviour is a single persistent session).
+            self.session_id = await mint()
         return self.session_id
 
 

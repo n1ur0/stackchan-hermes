@@ -71,10 +71,8 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import datetime as _dt
-import json
 import logging
 import os
-import tempfile
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -83,6 +81,7 @@ from . import activity_log
 from .audio_stream import is_recording
 from .heartbeat import is_quiet, parse_quiet_hours
 from .presence import PresenceState
+from .statefile import env_float, read_json_dict, write_json_atomic
 
 if TYPE_CHECKING:
     from .gateway import Gateway
@@ -179,14 +178,7 @@ _ALL_TRANSITIONS: tuple[_Transition, ...] = (
 
 def _env_number(name: str, default: float) -> float:
     """A numeric env var, warning and falling back on garbage."""
-    raw = os.getenv(name, "")
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning("proactive: invalid %s=%r; using %s", name, raw, default)
-        return default
+    return env_float(name, default, logger)
 
 
 def _parse_transitions(raw: str) -> set[str]:
@@ -250,10 +242,14 @@ class ProactiveSpeaker:
             return None
         config = ProactiveConfig(
             cooldown_min=max(
-                0.0, _env_number("STACKCHAN_PROACTIVE_COOLDOWN_MIN", DEFAULT_COOLDOWN_MIN)
+                0.0,
+                _env_number("STACKCHAN_PROACTIVE_COOLDOWN_MIN", DEFAULT_COOLDOWN_MIN),
             ),
             max_per_day=max(
-                0, int(_env_number("STACKCHAN_PROACTIVE_MAX_PER_DAY", DEFAULT_MAX_PER_DAY))
+                0,
+                int(
+                    _env_number("STACKCHAN_PROACTIVE_MAX_PER_DAY", DEFAULT_MAX_PER_DAY)
+                ),
             ),
             refire_min=max(
                 0.0, _env_number("STACKCHAN_PROACTIVE_REFIRE_MIN", DEFAULT_REFIRE_MIN)
@@ -271,7 +267,8 @@ class ProactiveSpeaker:
                 "STACKCHAN_PROACTIVE_NIGHT_PRESET", DEFAULT_NIGHT_PRESET
             ).strip(),
             mode_switch_delay_s=max(
-                0.0, _env_number("STACKCHAN_PROACTIVE_MODE_DELAY_S", DEFAULT_MODE_DELAY_S)
+                0.0,
+                _env_number("STACKCHAN_PROACTIVE_MODE_DELAY_S", DEFAULT_MODE_DELAY_S),
             ),
             state_path=Path(
                 os.getenv("STACKCHAN_PROACTIVE_STATE", "") or DEFAULT_STATE_PATH
@@ -281,9 +278,7 @@ class ProactiveSpeaker:
 
     # ---- callback --------------------------------------------------
 
-    async def on_state_change(
-        self, old: PresenceState, new: PresenceState
-    ) -> None:
+    async def on_state_change(self, old: PresenceState, new: PresenceState) -> None:
         """Presence transition observer (see :data:`presence.StateChangeCb`).
 
         Runs the full guard gauntlet, then asks Hermes for the wording and
@@ -389,7 +384,11 @@ class ProactiveSpeaker:
         self, old: PresenceState, new: PresenceState
     ) -> _Transition | None:
         for t in _ALL_TRANSITIONS:
-            if t.key in self._config.enabled_transitions and t.src == old and t.dst == new:
+            if (
+                t.key in self._config.enabled_transitions
+                and t.src == old
+                and t.dst == new
+            ):
                 return t
         return None
 
@@ -509,31 +508,12 @@ class ProactiveSpeaker:
         self._save_state()
 
     def _load_state(self) -> dict[str, Any]:
-        path = self._config.state_path
-        try:
-            data = json.loads(path.read_text("utf-8"))
-            return data if isinstance(data, dict) else {}
-        except FileNotFoundError:
-            return {}
-        except (OSError, ValueError) as exc:
-            logger.warning("proactive: unreadable state file %s (%s)", path, exc)
-            return {}
+        return read_json_dict(self._config.state_path, logger=logger, label="proactive")
 
     def _save_state(self) -> None:
-        # Atomic write (write-temp + os.replace), same flavour as the
-        # heartbeat/control state files: a crash mid-write must not
-        # truncate the day's speak-count into garbage.
         path = self._config.state_path
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as fp:
-                    json.dump(self._state, fp, ensure_ascii=False)
-                os.replace(tmp, path)
-            finally:
-                if os.path.exists(tmp):
-                    os.unlink(tmp)
+            write_json_atomic(path, self._state)
         except OSError as exc:
             logger.warning("proactive: cannot write state file %s (%s)", path, exc)
 

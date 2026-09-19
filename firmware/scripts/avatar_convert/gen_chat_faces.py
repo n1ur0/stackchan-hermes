@@ -32,8 +32,8 @@ W, H = 320, 240
 # Face geometry
 PANEL = (54, 18, 266, 222)          # rounded panel behind the face
 PANEL_R = 56
-PANEL_FILL = "#F2F8FF"
-PANEL_LINE = "#BBDEFB"
+PANEL_FILL = "#1E2A3D"              # dark navy card
+PANEL_LINE = "#5E84B8"              # muted steel-blue outline
 
 EYE_L = (118, 98)                   # left eye center
 EYE_R = (202, 98)                   # right eye center
@@ -49,12 +49,12 @@ BLUSH_L = (76, 132)
 BLUSH_R = (244, 132)
 BLUSH_RR = 24
 
-INK = "#1B1B1F"
-GLINT = "#FFFFFF"
+INK = "#EDF3FB"                     # light features (readable on dark)
+GLINT = "#16202E"                   # dark glint inside light eyes
 
 
 def new_canvas() -> tuple[Image.Image, ImageDraw.ImageDraw]:
-    im = Image.new("RGB", (W, H), "white")
+    im = Image.new("RGB", (W, H), "#0E1524")   # deep blue-black backdrop
     d = ImageDraw.Draw(im)
     d.rounded_rectangle(PANEL, radius=PANEL_R, fill=PANEL_FILL, outline=PANEL_LINE, width=6)
     return im, d
@@ -143,7 +143,7 @@ def mouth_half(d: ImageDraw.ImageDraw) -> None:
 def mouth_open(d: ImageDraw.ImageDraw, big: bool = True) -> None:
     if big:
         d.ellipse((138, MOUTH_Y - 22, 182, MOUTH_Y + 22), fill=INK)
-        d.ellipse((150, MOUTH_Y + 2, 170, MOUTH_Y + 14), fill="#F6A5C0")  # tongue
+        d.ellipse((150, MOUTH_Y + 2, 170, MOUTH_Y + 14), fill="#E0709A")  # tongue
     else:
         d.ellipse((144, MOUTH_Y - 18, 176, MOUTH_Y + 14), fill=INK)
 
@@ -169,7 +169,7 @@ def mouth_wavy(d: ImageDraw.ImageDraw, width=10) -> None:
 
 # ---- Cheeks --------------------------------------------------------------
 
-def blush(d: ImageDraw.ImageDraw, alpha: str = "#F9C9D8", rr: int = BLUSH_RR) -> None:
+def blush(d: ImageDraw.ImageDraw, alpha: str = "#E8A0BA", rr: int = BLUSH_RR) -> None:
     for cx, cy in (BLUSH_L, BLUSH_R):
         d.ellipse((cx - rr, cy - rr, cx + rr, cy + rr), fill=alpha)
 
@@ -229,7 +229,7 @@ def face_embarrassed() -> Image.Image:
     eye_half(d, *EYE_L)
     eye_half(d, *EYE_R)
     mouth_wavy(d)
-    blush(d, alpha="#F59BB8", rr=30)
+    blush(d, alpha="#E57B9E", rr=30)
     return im
 
 
@@ -277,8 +277,8 @@ FACES = {
     "surprised": face_surprised,
     "embarrassed": face_embarrassed,
 }
-PARTS = {f"eyes_{n}": (lambda n=n: part_eyes(n)) for n in ("open", "half", "closed")} | {
-    f"mouth_{n}": (lambda n=n: part_mouth(n)) for n in ("closed", "half", "open", "e", "u")
+PARTS = {f"eyes_{n}": (lambda n=n: part_eyes(f"eyes_{n}")) for n in ("open", "half", "closed")} | {
+    f"mouth_{n}": (lambda n=n: part_mouth(f"mouth_{n}")) for n in ("closed", "half", "open", "e", "u")
 }
 
 

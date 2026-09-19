@@ -36,8 +36,14 @@ import logging
 import os
 import time
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import Any, Final
+
+from .statefile import (
+    atomic_write_text,
+    env_path,
+    read_jsonl,
+    ts_unix_of,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,14 +62,7 @@ def resolve_log_path() -> Path | None:
     literal ``"off"`` to disable, or unset for the default
     ``~/.stackchan/activity_log.jsonl``.
     """
-    override = os.environ.get(PATH_ENV_VAR)
-    if override is None:
-        return DEFAULT_LOG_PATH
-    if override.strip().lower() == DISABLED_VALUE:
-        return None
-    if not override.strip():
-        return DEFAULT_LOG_PATH
-    return Path(override).expanduser()
+    return env_path(PATH_ENV_VAR, DEFAULT_LOG_PATH)
 
 
 def _retention_seconds() -> int:
@@ -75,7 +74,9 @@ def _retention_seconds() -> int:
             if parsed > 0:
                 days = parsed
         except ValueError:
-            logger.warning("activity_log: bad %s=%r; using default", RETENTION_ENV_VAR, raw)
+            logger.warning(
+                "activity_log: bad %s=%r; using default", RETENTION_ENV_VAR, raw
+            )
     return days * 24 * 60 * 60
 
 
@@ -147,23 +148,12 @@ def read_recent(
         return []
     rows: list[dict[str, Any]] = []
     try:
-        with path.open("r", encoding="utf-8") as f:
-            for raw in f:
-                stripped = raw.strip()
-                if not stripped:
-                    continue
-                try:
-                    obj = json.loads(stripped)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(obj, dict):
-                    continue
-                ts = obj.get("ts_unix")
-                if isinstance(ts, bool) or not isinstance(ts, (int, float)):
-                    continue
-                if source is not None and obj.get("source") != source:
-                    continue
-                rows.append(obj)
+        for _line, obj in read_jsonl(path):
+            if ts_unix_of(obj) is None:
+                continue
+            if source is not None and obj.get("source") != source:
+                continue
+            rows.append(obj)
     except (OSError, PermissionError) as exc:
         logger.warning("activity_log: failed to read %s: %s", path, exc)
         return []
@@ -193,39 +183,15 @@ def rotate_old_entries(
 
     kept: list[str] = []
     try:
-        with path.open("r", encoding="utf-8") as f:
-            for raw in f:
-                stripped = raw.strip()
-                if not stripped:
-                    continue
-                try:
-                    obj = json.loads(stripped)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(obj, dict):
-                    continue
-                ts = obj.get("ts_unix")
-                if isinstance(ts, bool) or not isinstance(ts, (int, float)):
-                    continue
-                if ts >= cutoff:
-                    kept.append(stripped + "\n")
+        for line, obj in read_jsonl(path):
+            ts = ts_unix_of(obj)
+            if ts is not None and ts >= cutoff:
+                kept.append(line + "\n")
     except (OSError, PermissionError) as exc:
         logger.warning("activity_log: failed to read %s for rotation: %s", path, exc)
         return
 
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            delete=False,
-            dir=str(path.parent),
-            prefix=path.name + ".",
-            suffix=".tmp",
-        ) as tmp:
-            tmp.writelines(kept)
-            tmp.flush()
-            tmp_path = Path(tmp.name)
-        os.replace(tmp_path, path)
+        atomic_write_text(path, "".join(kept))
     except (OSError, PermissionError) as exc:
         logger.warning("activity_log: failed to rotate %s: %s", path, exc)

@@ -35,13 +35,13 @@ Environment variables:
 from __future__ import annotations
 
 import datetime
-import json
 import logging
 import os
 import re
 import unicodedata
 
-import aiohttp
+from .http import post_json
+from .statefile import env_float
 
 logger = logging.getLogger(__name__)
 
@@ -144,14 +144,7 @@ def _env_float(name: str, default: float) -> float:
     path; warn once-per-turn and fall back so the misconfiguration is
     visible in the logs instead.
     """
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning("local LLM: invalid %s=%r; using %s", name, raw, default)
-        return default
+    return env_float(name, default, logger)
 
 
 def is_enabled() -> bool:
@@ -269,22 +262,16 @@ async def ask_local(text: str, *, system_prompt: str) -> str:
         "keep_alive": keep_alive,
     }
 
-    timeout = aiohttp.ClientTimeout(total=timeout_s)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(f"{base_url}/api/chat", json=payload) as resp:
-            body = await resp.text()
-            if resp.status != 200:
-                logger.error(
-                    "local LLM status=%d body=%s", resp.status, body[:500]
-                )
-                raise RuntimeError(
-                    f"local LLM returned status={resp.status}"
-                )
-    data = json.loads(body)
+    data = await post_json(
+        f"{base_url}/api/chat",
+        payload,
+        name="local LLM",
+        timeout_s=timeout_s,
+    )
     message = data.get("message")
     reply = message.get("content") if isinstance(message, dict) else None
     if not isinstance(reply, str):
-        logger.error("local LLM response missing message.content: %s", body[:500])
+        logger.error("local LLM response missing message.content: %s", str(data)[:500])
         raise RuntimeError("local LLM response missing message.content")
     reply = _THINK_RE.sub("", reply).strip()
     if not reply:

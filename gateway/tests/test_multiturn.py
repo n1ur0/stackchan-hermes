@@ -1,5 +1,7 @@
 """Tests for the multi-turn continuation policy (pure logic)."""
 
+import asyncio
+
 import pytest
 
 from stackchan_mcp import multiturn
@@ -96,14 +98,6 @@ def test_session_window_override_and_zero(monkeypatch):
     assert multiturn.session_window_s() == float(multiturn.DEFAULT_SESSION_WINDOW_S)
 
 
-def test_new_session_id_namespaces_and_is_unique():
-    a = multiturn.new_session_id("stackchan-voice")
-    b = multiturn.new_session_id("stackchan-voice")
-    assert a.startswith("stackchan-voice-")
-    assert b.startswith("stackchan-voice-")
-    assert a != b  # the uuid suffix makes each conversation distinct
-
-
 # ---- MultiturnSession -----------------------------------------------------
 
 
@@ -136,10 +130,10 @@ def test_session_is_gap_stale():
 
 
 def _counter():
-    """A deterministic id minter — id-1, id-2, … in call order."""
+    """A deterministic async id minter — id-1, id-2, … in call order."""
     seq = {"n": 0}
 
-    def mint() -> str:
+    async def mint() -> str:
         seq["n"] += 1
         return f"id-{seq['n']}"
 
@@ -148,7 +142,7 @@ def _counter():
 
 def test_conversation_id_mints_when_none_open():
     s = MultiturnSession()
-    cid = s.conversation_id(now=10.0, window_s=180.0, mint=_counter())
+    cid = asyncio.run(s.conversation_id(now=10.0, window_s=180.0, mint=_counter()))
     assert cid == "id-1"
     assert s.session_id == "id-1"
 
@@ -156,34 +150,38 @@ def test_conversation_id_mints_when_none_open():
 def test_conversation_id_reuses_within_window():
     s = MultiturnSession()
     mint = _counter()
-    first = s.conversation_id(now=10.0, window_s=180.0, mint=mint)
+    first = asyncio.run(s.conversation_id(now=10.0, window_s=180.0, mint=mint))
     s.last_activity = 10.0  # the caller stamps activity each turn
     # A follow-up 100 s later (< 180 s window) keeps the same id.
-    again = s.conversation_id(now=110.0, window_s=180.0, mint=mint)
+    again = asyncio.run(s.conversation_id(now=110.0, window_s=180.0, mint=mint))
     assert first == again == "id-1"
 
 
 def test_conversation_id_rotates_after_window():
     s = MultiturnSession()
     mint = _counter()
-    first = s.conversation_id(now=10.0, window_s=180.0, mint=mint)
+    first = asyncio.run(s.conversation_id(now=10.0, window_s=180.0, mint=mint))
     s.last_activity = 10.0
     # 200 s later (> 180 s window) → a fresh conversation, new id.
-    rotated = s.conversation_id(now=210.0, window_s=180.0, mint=mint)
+    rotated = asyncio.run(s.conversation_id(now=210.0, window_s=180.0, mint=mint))
     assert first == "id-1"
     assert rotated == "id-2"
     assert s.session_id == "id-2"
 
 
-def test_conversation_id_window_zero_disables_rotation():
+def test_conversation_id_window_zero_mints_once_then_reuses():
     s = MultiturnSession()
     mint = _counter()
-    # window 0 never mints — the id stays empty so the caller falls back
-    # to the fixed base id (restoring the pre-Phase-2 fixed-id behaviour).
-    assert s.conversation_id(now=10.0, window_s=0.0, mint=mint) == ""
-    s.last_activity = 10.0
-    assert s.conversation_id(now=10_000.0, window_s=0.0, mint=mint) == ""
-    assert s.session_id == ""
+    # window 0 means "no rotation" — but the native API only streams
+    # into sessions that exist, so the first turn mints one persistent
+    # session and every later turn reuses it (never rotates again).
+    first = asyncio.run(s.conversation_id(now=10.0, window_s=0.0, mint=mint))
+    assert first == "id-1"
+    assert s.session_id == "id-1"
+    # Even a huge gap does not rotate.
+    again = asyncio.run(s.conversation_id(now=10_000.0, window_s=0.0, mint=mint))
+    assert again == "id-1"
+    assert s.session_id == "id-1"
 
 
 # ---- should_continue policy matrix ---------------------------------------
