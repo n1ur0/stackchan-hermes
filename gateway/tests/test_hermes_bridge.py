@@ -317,6 +317,12 @@ def _patch_voice_pipeline(
     monkeypatch.setattr(control, "multiturn_enabled", multiturn.is_enabled)
 
     async def fake_send(arguments, *, gateway=None, **kw):
+        # Emulate the real orchestrator: the subtitle is shown only once
+        # the audio is loaded — fire the audio-ready callback before
+        # returning, exactly like synthesize_and_send does.
+        on_audio_ready = kw.get("on_audio_ready")
+        if on_audio_ready is not None:
+            await on_audio_ready()
         return {"frame_count": 1}
 
     monkeypatch.setattr(tts_orch, "synthesize_and_send", fake_send)

@@ -110,13 +110,29 @@ def _clamp_reply_for_voice(reply: str) -> str:
     return clamped or reply[:max_chars].rstrip()
 
 
-#: Spoken replies must stay short — they are synthesised and played on
-#: a 1 W speaker, and long monologues kill the conversation rhythm.
+#: Prompt for spoken replies that summarise rather than dump. StackChan is a
+#: small voice robot: it should read/search, then give the user a concise but
+#: complete digest — the key point first, then the essentials — instead of
+#: reading back the raw retrieved content verbatim (which becomes a wall of
+#: speech on the 1 W speaker). "Summarise" means condense to what matters,
+#: not truncate mid-thought: a well-formed digest has an ending. It should be
+#: a thorough spoken briefing, not a one-liner: mention EVERY distinct story
+#: or point the sources carry, each with a concrete detail.
 DEFAULT_VOICE_SYSTEM_PROMPT = (
     "You are StackChan, a small robot talking by voice. "
     "The user's speech comes from speech recognition, so fill in slight "
-    "misrecognitions from context. Reply in short, spoken language, "
-    "1-3 sentences. No symbols or bullet lists."
+    "misrecognitions from context. Answer in natural, spoken language, "
+    "as a clear spoken briefing. "
+    "When you fetch or search for content, do not read it back verbatim — "
+    "synthesize it, but be thorough: lead with the single most important "
+    "point, then work through EVERY distinct story, headline or key fact the "
+    "material covers, giving each its own complete sentence with concrete "
+    "detail (who, what, numbers). Aim for a rich, informative briefing that "
+    "covers the whole picture — usually six to ten sentences. Only add a "
+    "tightener if you have extra room; never leave a major story out. "
+    "Stay faithful to the source: don't invent details. Always finish with "
+    "a complete sentence; don't just stop. No symbols, no bullet lists, "
+    "no headings."
 )
 
 #: Tool-routing guidance appended to the voice system prompt. The
@@ -692,14 +708,12 @@ async def _run_voice_turn(
     logger.info("voice_turn: reply=%r session=%s", reply[:120], session_id)
     # Keep the spoken turn short: see _clamp_reply_for_voice.
     reply = _clamp_reply_for_voice(reply)
-    # Phase F: show the reply as a subtitle while it plays, and — only
-    # for Hermes-routed turns — light the "H" badge + the Hermes LED
-    # colour. Local-LLM turns stay badge-free and keep the listening
-    # colour. Re-asserting the Hermes colour here (idempotent with the
-    # pre-call set above) covers a local→Hermes fallback. The outer
-    # handle_voice_turn finally restores the idle LED on every exit
-    # path (incl. a TTS failure below).
-    await control.set_device_subtitle(gateway, reply)
+    # Phase F: light the "H" badge + the Hermes LED colour for
+    # Hermes-routed turns. Local-LLM turns stay badge-free and keep the
+    # listening colour. Re-asserting the Hermes colour here (idempotent
+    # with the pre-call set above) covers a local→Hermes fallback. The
+    # outer handle_voice_turn finally restores the idle LED on every
+    # exit path (incl. a TTS failure below).
     if route == local_llm.ROUTE_HERMES:
         await control.set_device_route_badge(gateway, "H")
         await control.apply_led_state(gateway, "hermes")
@@ -710,7 +724,15 @@ async def _run_voice_turn(
     # tracks the voice instead of landing after it.
     gateway.choreo.talk(_estimate_speech_duration_ms(reply))
     try:
-        tts_result = await synthesize_and_send({"text": reply}, gateway=gateway)
+        tts_result = await synthesize_and_send(
+            {"text": reply},
+            gateway=gateway,
+            # Show the spoken reply as the subtitle only once the audio is
+            # actually loaded (PCM synthesised and about to be pushed), so
+            # the text never sits on screen during the TTS synthesis gap.
+            # The finally in handle_voice_turn still clears it afterwards.
+            on_audio_ready=lambda: control.set_device_subtitle(gateway, reply),
+        )
     except Exception as exc:
         logger.exception("voice_turn: TTS failed")
         return web.json_response(

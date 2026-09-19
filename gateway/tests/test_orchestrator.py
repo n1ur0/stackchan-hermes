@@ -28,8 +28,6 @@ class _PCMEngine(TTSEngine):
         return self._pcm
 
 
-
-
 @pytest.fixture
 def fake_encode(monkeypatch):
     """Replace encode_opus_frames so tests don't need libopus.
@@ -40,16 +38,12 @@ def fake_encode(monkeypatch):
     """
 
     def fake(pcm: bytes, **kwargs):
-        samples_per_frame = (
-            DEVICE_SAMPLE_RATE * DEVICE_FRAME_DURATION_MS // 1000
-        )
+        samples_per_frame = DEVICE_SAMPLE_RATE * DEVICE_FRAME_DURATION_MS // 1000
         bytes_per_frame = samples_per_frame * 2
         n_full = len(pcm) // bytes_per_frame
         n_partial = 1 if len(pcm) % bytes_per_frame else 0
         n_total = n_full + n_partial
-        return iter(
-            f"opus_frame_{i}".encode() for i in range(n_total)
-        )
+        return iter(f"opus_frame_{i}".encode() for i in range(n_total))
 
     import stackchan_mcp.tts.orchestrator as orchestrator
 
@@ -94,6 +88,51 @@ async def test_pipeline_synthesises_encodes_and_pushes(fake_encode):
     # All frames sit between start and stop.
     middle = esp32.events[1:-1]
     assert all(kind == "frame" for kind, _ in middle)
+
+
+@pytest.mark.asyncio
+async def test_audio_ready_fires_after_synthesis_before_frames(fake_encode):
+    """on_audio_ready fires once the PCM is loaded, before any frame is pushed.
+
+    The bridge uses this to show the spoken reply as a subtitle only when
+    the audio is actually ready to play — never during the synthesis gap.
+    """
+    order: list[str] = []
+    pcm = b"\x01\x00" * 960  # exactly one 60ms frame
+    engine = _PCMEngine(pcm)
+
+    async def record_ready():
+        # Recorded after synthesis, before send_pcm_audio pushes frames.
+        order.append("audio_ready")
+
+    esp32 = _FakeESP32(connected=True)
+    gateway = _FakeGateway(esp32)
+    monkeypatch = pytest.MonkeyPatch()
+
+    # Capture the push itself so we can assert ordering around it.
+    orig_send = type(esp32).send_audio_frame
+
+    async def tracking_send(self, frame):
+        order.append("frame")
+        return await orig_send(self, frame)
+
+    monkeypatch.setattr(type(esp32), "send_audio_frame", tracking_send)
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    result = await synthesize_and_send(
+        {"text": "hello", "voice": "voicevox"},
+        gateway=gateway,
+        registry=reg,
+        on_audio_ready=record_ready,
+    )
+
+    monkeypatch.undo()
+
+    assert result["frame_count"] == 1
+    # The audio-ready callback fired before any frame reached the wire.
+    assert order == ["audio_ready", "frame"]
 
 
 @pytest.mark.asyncio
@@ -163,9 +202,7 @@ async def test_pipeline_blocks_protocol_v2(fake_encode):
     reg.register(engine)
 
     with pytest.raises(RuntimeError, match="protocol v1"):
-        await synthesize_and_send(
-            {"text": "hello"}, gateway=gateway, registry=reg
-        )
+        await synthesize_and_send({"text": "hello"}, gateway=gateway, registry=reg)
 
     # Nothing should reach the device — neither TTS state notifications
     # nor audio frames — and the engine must not even be invoked, since
@@ -214,12 +251,8 @@ async def test_pipeline_serialises_concurrent_say_calls(fake_encode):
     )
 
     events = esp32.events
-    start_indices = [
-        i for i, e in enumerate(events) if e == ("tts_state", "start")
-    ]
-    stop_indices = [
-        i for i, e in enumerate(events) if e == ("tts_state", "stop")
-    ]
+    start_indices = [i for i, e in enumerate(events) if e == ("tts_state", "start")]
+    stop_indices = [i for i, e in enumerate(events) if e == ("tts_state", "stop")]
     assert len(start_indices) == 2
     assert len(stop_indices) == 2
 
@@ -227,12 +260,7 @@ async def test_pipeline_serialises_concurrent_say_calls(fake_encode):
     #   start_0 < stop_0 < start_1 < stop_1
     # The second utterance cannot begin until the first one finishes
     # its stop notification.
-    assert (
-        start_indices[0]
-        < stop_indices[0]
-        < start_indices[1]
-        < stop_indices[1]
-    )
+    assert start_indices[0] < stop_indices[0] < start_indices[1] < stop_indices[1]
 
 
 @pytest.mark.asyncio
@@ -250,9 +278,7 @@ async def test_pipeline_blocks_protocol_v3(fake_encode):
     reg.register(engine)
 
     with pytest.raises(RuntimeError, match=r"v3"):
-        await synthesize_and_send(
-            {"text": "hi"}, gateway=gateway, registry=reg
-        )
+        await synthesize_and_send({"text": "hi"}, gateway=gateway, registry=reg)
 
     assert esp32.tts_states == []
     assert esp32.frames == []
