@@ -626,6 +626,13 @@ private:
     }
 };
 
+// LVGL animation exec callback for the subtitle auto-scroll. The device
+// pushes audio at real-time pace, so scrolling the caption to match the
+// speech: values run 0 → max scroll Y; each tick snaps scroll to that Y.
+void subtitle_scroll_anim_exec_cb(void* var, int32_t v) {
+    lv_obj_scroll_to_y(static_cast<lv_obj_t*>(var), v, LV_ANIM_OFF);
+}
+
 class StackChanBoard : public WifiBoard {
 private:
     // Internal I2C bus (shared by AXP2101 / AW9523 / FT6336 / PY32 / Si12T /
@@ -891,7 +898,11 @@ private:
     //   listen = start a tap-equivalent listen (record -> STT -> Hermes)
     //   off    = no reaction
     enum class ProxMode { Off, Reflex, Listen };
-    static constexpr ProxMode PROX_MODE_DEFAULT = ProxMode::Listen;
+    // Touchscreen-only activation policy (user requirement 2026-09-19): the
+    // hand-wave must NOT open the audio channel. Default is therefore Reflex
+    // (head-up + happy face, board-local), and any persisted "listen" value
+    // is migrated down to "reflex" at boot (see InitializeLtr553Proximity).
+    static constexpr ProxMode PROX_MODE_DEFAULT = ProxMode::Reflex;
     static constexpr int PROX_PS_THRESHOLD_DEFAULT    = 600;
                                                        // raw PS counts (0..2047):
                                                        // above the 20-30cm
@@ -4637,10 +4648,20 @@ private:
             if (!StringToProxMode(mode_str, &prox_mode_)) {
                 // No (or invalid) "mode" key: migrate from the legacy
                 // "enabled" bool written before mode was introduced.
-                // enabled=true -> the new default (listen), false -> off.
+                // enabled=true -> the new default (reflex), false -> off.
                 // The legacy key is left in place (harmless, read-only).
                 bool legacy_enabled = settings.GetBool("enabled", true);
                 prox_mode_ = legacy_enabled ? PROX_MODE_DEFAULT : ProxMode::Off;
+            } else if (prox_mode_ == ProxMode::Listen) {
+                // Touchscreen-only activation policy: a persisted "listen"
+                // (from before 2026-09-19) must not survive a reboot. Downgrade
+                // to reflex and write it back so the stale value is cleaned.
+                ESP_LOGW(TAG, "proximity 'listen' migrated to 'reflex' (touchscreen-only policy)");
+                prox_mode_ = ProxMode::Reflex;
+                {
+                    Settings writable("stackchan_prox", true);
+                    writable.SetString("mode", "reflex");
+                }
             }
             prox_ps_threshold_ =
                 settings.GetInt("threshold", PROX_PS_THRESHOLD_DEFAULT);
@@ -5037,11 +5058,14 @@ private:
             return false;
         }
         // Wrap long sentences across lines instead of overflowing the screen
-        // width. The fixed width (300 of the 320 px LCD) plus a max height of
-        // ~3 lines keeps the box to 2-3 wrapped lines; extra text is clipped.
+        // width. The width is fixed (300 of the 320 px LCD) and the height
+        // is clamped with a hard cap so the caption reads as a ~3-line
+        // viewport. Longer replies stay legible because the label is
+        // SCROLLABLE: SetSubtitleText() auto-scrolls to the bottom as the
+        // TTS plays, instead of clipping the overflow forever.
         lv_label_set_long_mode(subtitle_label_, LV_LABEL_LONG_MODE_WRAP);
         lv_obj_set_width(subtitle_label_, 300);
-        lv_obj_set_style_max_height(subtitle_label_, 78, 0);
+        lv_obj_set_height(subtitle_label_, 78);
         lv_obj_set_style_text_align(subtitle_label_, LV_TEXT_ALIGN_CENTER, 0);
         // Same translucent black backing as status_label_ for legibility.
         lv_obj_set_style_bg_color(subtitle_label_, lv_color_black(), 0);
@@ -5053,7 +5077,12 @@ private:
         lv_obj_set_style_pad_top(subtitle_label_, 3, 0);
         lv_obj_set_style_pad_bottom(subtitle_label_, 3, 0);
         lv_obj_align(subtitle_label_, LV_ALIGN_BOTTOM_MID, 0, -6);
-        lv_obj_clear_flag(subtitle_label_, LV_OBJ_FLAG_SCROLLABLE);
+        // Scrollable so overflow text can be revealed (the scroll animation
+        // is started from SetSubtitleText). No scrollbar and no horizontal
+        // scroll, so the caption still reads as a clean fixed box.
+        lv_obj_add_flag(subtitle_label_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_scroll_dir(subtitle_label_, LV_DIR_VER);
+        lv_obj_set_scrollbar_mode(subtitle_label_, LV_SCROLLBAR_MODE_OFF);
         // Hidden until the first non-empty SetSubtitleText().
         lv_obj_add_flag(subtitle_label_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(subtitle_label_);
@@ -5075,6 +5104,10 @@ private:
         if (!EnsureSubtitleLabel()) {
             return false;
         }
+        // Stop any in-flight scroll animation and reset to the top before
+        // applying new content (either clearing or a fresh subtitle).
+        lv_anim_delete(subtitle_label_, subtitle_scroll_anim_exec_cb);
+        lv_obj_scroll_to_y(subtitle_label_, 0, LV_ANIM_OFF);
         if (safe[0] == '\0') {
             lv_obj_add_flag(subtitle_label_, LV_OBJ_FLAG_HIDDEN);
             // Redraw the vacated area (the hidden label can't invalidate
@@ -5087,6 +5120,28 @@ private:
             // Same-frame flush so the subtitle appears without a one-turn lag.
             lv_obj_update_layout(subtitle_label_);
             lv_obj_invalidate(subtitle_label_);
+
+            // Auto-scroll: the caption box is a ~3-line viewport, but the
+            // reply is clamped at the gateway to several sentences. Scroll
+            // from top to bottom over ~the speech duration (same ~90 ms/char
+            // heuristic the gateway choreographer uses to size the talking
+            // phase) so new sentences reveal themselves while the TTS plays.
+            int32_t scroll_max = lv_obj_get_scroll_bottom(subtitle_label_);
+            if (scroll_max > 0) {
+                uint32_t scroll_ms = 1200 + static_cast<uint32_t>(strlen(safe)) * 90;
+                if (scroll_ms > 30000) {
+                    scroll_ms = 30000;
+                }
+                lv_anim_t a;
+                lv_anim_init(&a);
+                lv_anim_set_var(&a, subtitle_label_);
+                lv_anim_set_exec_cb(&a, subtitle_scroll_anim_exec_cb);
+                lv_anim_set_values(&a, 0, scroll_max);
+                lv_anim_set_duration(&a, scroll_ms);
+                lv_anim_set_path_cb(&a, lv_anim_path_linear);
+                lv_anim_start(&a);
+                ESP_LOGI(TAG, "Subtitle auto-scroll: %d px over %u ms", (int)scroll_max, (unsigned)scroll_ms);
+            }
         }
         lv_refr_now(lv_obj_get_display(subtitle_label_));
         return true;
@@ -6762,9 +6817,20 @@ private:
                 if (!StringToProxMode(mode_str, &mode)) {
                     cJSON_AddBoolToObject(root, "ok", false);
                     cJSON_AddStringToObject(root, "error",
-                        "Unknown mode. Allowed: reflex, listen, off.");
+                        "Unknown mode. Allowed: reflex, off.");
                     ESP_LOGW(TAG, "set_proximity_config rejected: unknown mode '%s'",
                              mode_str.c_str());
+                    return root;
+                }
+                if (mode == ProxMode::Listen) {
+                    // Touchscreen-only activation policy: the hand-wave must
+                    // not open the audio channel. Reject 'listen' outright so
+                    // a LLM / user cannot re-enable it at runtime via MCP.
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error",
+                        "Mode 'listen' is disabled by policy: touchscreen is "
+                        "the only allowed listening trigger. Use 'reflex' or 'off'.");
+                    ESP_LOGW(TAG, "set_proximity_config rejected: mode 'listen' disabled by policy");
                     return root;
                 }
                 {
