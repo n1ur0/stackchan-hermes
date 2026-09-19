@@ -5059,13 +5059,13 @@ private:
         }
         // Wrap long sentences across lines instead of overflowing the screen
         // width. The width is fixed (300 of the 320 px LCD) and the height
-        // is clamped with a hard cap so the caption reads as a ~3-line
+        // is clamped with a hard cap so the caption reads as a ~5-line
         // viewport. Longer replies stay legible because the label is
         // SCROLLABLE: SetSubtitleText() auto-scrolls to the bottom as the
         // TTS plays, instead of clipping the overflow forever.
         lv_label_set_long_mode(subtitle_label_, LV_LABEL_LONG_MODE_WRAP);
         lv_obj_set_width(subtitle_label_, 300);
-        lv_obj_set_height(subtitle_label_, 78);
+        lv_obj_set_height(subtitle_label_, 130);
         lv_obj_set_style_text_align(subtitle_label_, LV_TEXT_ALIGN_CENTER, 0);
         // Same translucent black backing as status_label_ for legibility.
         lv_obj_set_style_bg_color(subtitle_label_, lv_color_black(), 0);
@@ -5121,16 +5121,17 @@ private:
             lv_obj_update_layout(subtitle_label_);
             lv_obj_invalidate(subtitle_label_);
 
-            // Auto-scroll: the caption box is a ~3-line viewport, but the
+            // Auto-scroll: the caption box is a ~5-line viewport, but the
             // reply is clamped at the gateway to several sentences. Scroll
-            // from top to bottom over ~the speech duration (same ~90 ms/char
-            // heuristic the gateway choreographer uses to size the talking
-            // phase) so new sentences reveal themselves while the TTS plays.
+            // from top to bottom over ~40 ms/char (roughly half the speech
+            // pace the gateway choreographer estimates at ~90 ms/char) so
+            // the full caption is revealed quickly and stays readable while
+            // the TTS plays, without lingering on stale lines.
             int32_t scroll_max = lv_obj_get_scroll_bottom(subtitle_label_);
             if (scroll_max > 0) {
-                uint32_t scroll_ms = 1200 + static_cast<uint32_t>(strlen(safe)) * 90;
-                if (scroll_ms > 30000) {
-                    scroll_ms = 30000;
+                uint32_t scroll_ms = 600 + static_cast<uint32_t>(strlen(safe)) * 40;
+                if (scroll_ms > 15000) {
+                    scroll_ms = 15000;
                 }
                 lv_anim_t a;
                 lv_anim_init(&a);
