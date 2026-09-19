@@ -161,6 +161,7 @@ def test_tts_synthesize_posts_and_decodes_to_16k_pcm():
     assert request["path"] == "/v1/audio/speech"
     assert request["json"]["model"] == DEFAULT_TTS_MODEL
     assert request["json"]["input"] == "olá stackchan"
+    assert request["json"]["response_format"] == "wav"
     assert "voice" not in request["json"]
 
     # 100 ms of 24 kHz source resampled to 16 kHz mono s16 ≈ 3200 bytes.

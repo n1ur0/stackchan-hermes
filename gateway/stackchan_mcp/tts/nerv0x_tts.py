@@ -173,6 +173,11 @@ class Nerv0xTTSEngine(TTSEngine):
         payload: dict[str, Any] = {
             "model": self._model_name,
             "input": text,
+            # Explicit request-format contract rather than relying on a
+            # server-side default: some OpenAI-compatible backends (Kokoro)
+            # default to raw PCM, others (Qwen3-TTS) to WAV. The decoder
+            # here only accepts WAV, so pin the format server-side.
+            "response_format": "wav",
         }
         voice = opts.get("voice") or self._voice
         if isinstance(voice, str) and voice:
