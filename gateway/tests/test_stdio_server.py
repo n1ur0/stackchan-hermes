@@ -46,6 +46,33 @@ async def test_list_tools_includes_get_head_angles():
     assert "get_head_angles" in tool_names
 
 
+@pytest.mark.asyncio
+async def test_set_volume_routes_through_control(monkeypatch):
+    """set_volume is a gateway handler that persists via control.set_volume."""
+    from stackchan_mcp import toolkit
+
+    calls = []
+
+    async def fake_control_set_volume(gateway, volume):
+        calls.append((gateway, volume))
+        return {"ok": True, "volume": volume, "muted": False}
+
+    monkeypatch.setattr(toolkit.control, "set_volume", fake_control_set_volume)
+    calls2, gateway = _make_relay_gateway()
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: gateway)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(method="tools/call", params={"name": "set_volume", "arguments": {"volume": 40}})  # type: ignore[arg-type]  # noqa: E501
+    )
+
+    # The persistent handler, not a bare ESP32 relay, is used.
+    assert calls == [(gateway, 40)]
+    assert calls2 == []
+    assert json.loads(result.root.content[0].text) == {"ok": True, "volume": 40, "muted": False}
+
+
+
 def _make_relay_gateway(response_text: str = "{}"):
     """Wire a connected FakeESP32/FakeGateway pair; records tool calls.
 

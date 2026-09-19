@@ -88,6 +88,10 @@ async def _say(gateway: Any, arguments: dict[str, Any]) -> Any:
     return await synthesize_and_send(arguments, gateway=gateway)
 
 
+async def _set_volume(gateway: Any, arguments: dict[str, Any]) -> Any:
+    return await control.set_volume(gateway, arguments.get("volume"))
+
+
 async def _listen(gateway: Any, arguments: dict[str, Any]) -> Any:
     return await listen_and_transcribe(arguments, gateway=gateway)
 
@@ -169,6 +173,7 @@ HANDLERS: dict[str, Handler] = {
     "get_status": _get_status,
     "get_presence": _get_presence,
     "say": _say,
+    "set_volume": _set_volume,
     "listen": _listen,
     "load_avatar_set": _load_avatar_set,
     "switchbot_list_devices": partial(_switchbot, name="switchbot_list_devices"),
@@ -268,7 +273,7 @@ TOOLS: list[ToolDef] = [
     ToolDef('get_presence', 'Get the room\'s current presence state from the TMOS sensor: state (active=someone present and awake hours / quiet=present during sleeping hours / absent=room empty / unknown=not yet read), seconds since last detection, and the configured thresholds. Gateway-local, no device round-trip. Use this to answer whether anyone is in the room right now. Returns {"enabled": false} when presence monitoring is off.', '{"type": "object", "properties": {}}', handler=HANDLERS['get_presence']),
     ToolDef('get_device_info', 'Get real-time device information from ESP32: battery level, speaker volume, screen brightness, network status, etc.', '{"type": "object", "properties": {}}', relay='self.get_device_status'),
     ToolDef('take_photo', "Take a photo with the robot's camera and ask a question about it. The device captures an image and returns an AI-generated description.", '{"type": "object", "properties": {"question": {"type": "string", "description": "Question to ask about the photo (e.g. \'What do you see?\')"}}, "required": ["question"]}', relay='self.camera.take_photo'),
-    ToolDef('set_volume', 'Set the speaker volume (0-100).', '{"type": "object", "properties": {"volume": {"type": "integer", "description": "Volume level (0-100)"}}, "required": ["volume"]}', relay='self.audio_speaker.set_volume'),
+    ToolDef('set_volume', 'Set the speaker volume (0-100). The value is clamped to 0..100 and persisted in the gateway state, so the chosen level is restored automatically whenever the ESP32 reconnects. Returns the applied volume.', '{"type": "object", "properties": {"volume": {"type": "integer", "description": "Volume level (0-100)"}}, "required": ["volume"]}', handler=HANDLERS['set_volume']),
     ToolDef('set_mic_gain', 'Set the microphone input gain (0-36).', '{"type": "object", "properties": {"gain": {"type": "integer", "description": "Mic gain level (0-36)", "minimum": 0, "maximum": 36}}, "required": ["gain"]}', relay='self.audio_speaker.set_mic_gain'),
     ToolDef('set_brightness', 'Set the screen brightness (0-100).', '{"type": "object", "properties": {"brightness": {"type": "integer", "description": "Brightness level (0-100)"}}, "required": ["brightness"]}', relay='self.screen.set_brightness'),
     ToolDef('move_head', "Move the robot's head to safe, recommended angles. yaw: horizontal (-90 to 90), pitch: vertical (5 to 85, the M5Stack-recommended operating range). Out-of-range requests are rejected at this MCP layer; for advanced callers that need the firmware hard clamp (pitch 0..88), use the firmware-side `set_head_angles` device tool, which exposes a permissive schema and the authoritative two-tier guard described in the README.", {"type": "object", "properties": {"yaw": {"type": "integer", "description": "Horizontal angle in degrees (-90 to 90)", "minimum": -90, "maximum": 90}, "pitch": {"type": "integer", "description": "Vertical angle in degrees (5 to 85, M5Stack-recommended operating range). For the wider firmware hard clamp (0..88), use the `set_head_angles` device tool instead.", "minimum": 5, "maximum": 85}, "speed": {"oneOf": [{"enum": ["low", "mid", "high"]}, {"type": "integer", "minimum": 1, "maximum": SPEED_DPS_MAX}], "description": SPEED_DESCRIPTION}}, "required": ["yaw", "pitch"]}, relay='self.robot.set_head_angles', prepare=_prepare_move_head),
