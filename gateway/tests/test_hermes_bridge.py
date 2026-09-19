@@ -204,9 +204,29 @@ class _StubESP32:
         self.listen_calls.append((state, mode))
 
 
+class _StubChoreo:
+    """No-op stand-in for the gateway's Choreographer (see gateway.py)."""
+
+    def engage(self) -> None:
+        pass
+
+    def thinking(self) -> None:
+        pass
+
+    def tool_step(self, *, is_first: bool) -> None:
+        pass
+
+    def talk(self, duration_ms: int) -> None:
+        pass
+
+    def release(self, *, happy: bool = False) -> None:
+        pass
+
+
 class _StubGateway:
     def __init__(self) -> None:
         self.esp32 = _StubESP32()
+        self.choreo = _StubChoreo()
         self.voice_turn_active = False
         self.multiturn = MultiturnSession()
         self.multiturn_active = False

@@ -73,6 +73,21 @@ _NON_SPEECH_LABEL_RE = re.compile(r"^(?:\[[^\]\n]*\][\s]*)+$")
 #: push into a ~2.4 s decode queue), so a long reply stretches the turn
 #: wall-clock linerally AND lets rapid taps queue behind the tts_lock.
 #: A deterministic sentence/char budget keeps every spoken reply ≤ ~5 s.
+def _estimate_speech_duration_ms(reply: str) -> int:
+    """Rough spoken length of a (clamped) reply, in ms.
+
+    Used only to size the talking choreography (mouth sequence + speech
+    nods) that plays *while* the TTS audio is pushed. It need not be
+    frame-accurate: the mouth sequence just has to read as "speaking".
+    ~90 ms per character approximates a calm English reading pace with
+    a short floor so even a one-word reply gets a beat of lip-sync.
+    """
+    n = len((reply or "").strip())
+    if n <= 0:
+        return 0
+    return max(1200, int(n * 90))
+
+
 #: Env-tunable: STACKCHAN_MAX_REPLY_CHARS (default 160),
 #: STACKCHAN_MAX_REPLY_SENTENCES (default 2).
 def _clamp_reply_for_voice(reply: str) -> str:
@@ -502,6 +517,9 @@ async def handle_voice_turn(request: web.Request) -> web.Response:
             await control.set_device_status_text(gateway, control.STATUS_CLEAR)
             await control.set_device_route_badge(gateway, "")
             await control.restore_idle_led(gateway)
+            # Aliveness: turn over — cancel any talking/weave motion, restore
+            # the home head pose, face back to idle with blink on.
+            gateway.choreo.release()
             # Multi-turn UX: if this turn hit the conversation's turn
             # ceiling on a still-open question, leave a "tap to continue"
             # hint on screen instead of blanking the subtitle. The flag is
@@ -584,6 +602,8 @@ async def _run_voice_turn(
     # so "I'm listening..." reads naturally at the start of recognition; flip
     # to "Thinking..." the moment STT is done and the brain takes over.
     await control.set_device_status_text(gateway, control.STATUS_LISTENING)
+    # Aliveness: conversation just opened — welcome glance + idle face.
+    gateway.choreo.engage()
     # Phase 2 LED: show the "listening" colour through STT (self-
     # contained; on_listen_started already set it for device listens).
     await control.apply_led_state(gateway, "listening")
@@ -622,14 +642,23 @@ async def _run_voice_turn(
 
     logger.info("voice_turn: transcript=%r session=%s", transcript[:120], session_id)
     await control.set_device_status_text(gateway, control.STATUS_THINKING)
+    # Aliveness: LLM working — pensive lateral weave behind "Thinking...".
+    gateway.choreo.thinking()
 
     # Phase F (steps): stream the Hermes turn and surface each tool the
     # agent starts as a short LCD status line ("Searching...", "Saving
     # note...", ...) so the screen reflects actual progress instead of a
     # static "Thinking..." for the whole LLM round-trip. Best-effort:
     # set_device_status_text swallows failures.
+    _first_tool_seen = False
+
     async def _report_step(tool: str, label: str = "") -> None:
         await control.set_device_status_text(gateway, tool_status_text(tool, label))
+        # Aliveness: a light consult-tilt on the first tool only; later
+        # tools keep motion muted (the status line is the signal).
+        nonlocal _first_tool_seen
+        gateway.choreo.tool_step(is_first=not _first_tool_seen)
+        _first_tool_seen = True
 
     # The dashboard's Hermes-pin toggle (persisted in the control state):
     # read once per turn and thread into both the LED hint and the reply
@@ -674,6 +703,12 @@ async def _run_voice_turn(
     if route == local_llm.ROUTE_HERMES:
         await control.set_device_route_badge(gateway, "H")
         await control.apply_led_state(gateway, "hermes")
+    # Aliveness: the reply is about to play, and synthesize_and_send pushes
+    # audio at real-time pace (so it returns only after the reply has
+    # played). Start the talking choreography — happy face, lip-sync mouth
+    # sized to the reply, a few speech nods — concurrently so body language
+    # tracks the voice instead of landing after it.
+    gateway.choreo.talk(_estimate_speech_duration_ms(reply))
     try:
         tts_result = await synthesize_and_send({"text": reply}, gateway=gateway)
     except Exception as exc:

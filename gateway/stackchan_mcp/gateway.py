@@ -15,6 +15,7 @@ from aiohttp import web
 
 from . import activity_log
 from .capture_server import create_capture_app, stage_avatar_set
+from .choreographer import Choreographer
 from .esp32_client import ESP32Manager
 from .heartbeat import HeartbeatRunner
 from .mdns_advertiser import MdnsAdvertiser
@@ -63,6 +64,8 @@ class Gateway:
         self.esp32 = ESP32Manager()
         self._running = False
         self._http_runner: web.AppRunner | None = None
+        # In-conversation body language (see :mod:`stackchan_mcp.choreographer`).
+        self.choreo = Choreographer(self)
         # Phase 4.5 avatar: kept so load_avatar_set can stage payloads
         # against the same web.Application that serves /avatar_set/{id}.
         self._capture_app: web.Application | None = None
