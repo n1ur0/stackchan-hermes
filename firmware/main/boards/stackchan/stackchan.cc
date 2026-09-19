@@ -4984,6 +4984,14 @@ private:
         if (status_label_ == nullptr) {
             return false;
         }
+        // Bound the label to the LCD width with wrap, so a long status
+        // caption (e.g. "Searching: <query>") wraps onto a second line
+        // instead of overflowing past the screen edge and being clipped.
+        // Width 304 leaves an 8px margin each side of the 320px display,
+        // mirroring the subtitle label's fixed-width treatment.
+        lv_label_set_long_mode(status_label_, LV_LABEL_LONG_MODE_WRAP);
+        lv_obj_set_width(status_label_, 304);
+        lv_obj_set_style_text_align(status_label_, LV_TEXT_ALIGN_CENTER, 0);
         // Translucent black backing for legibility over the face. The label
         // inherits the screen's text font (the common puhui font with
         // Japanese glyphs), so no explicit font is set here.
