@@ -504,6 +504,37 @@ async def test_voice_turn_empty_transcript_not_recorded(monkeypatch, voice_turn)
     control._CONVERSATION.clear()
 
 
+@pytest.mark.parametrize(
+    "label",
+    [
+        "[Som de futebol]",
+        "[MÚSICA]",
+        "[Som de fio]",
+        "[Applause]  [Music]",
+    ],
+)
+@pytest.mark.asyncio
+async def test_voice_turn_non_speech_labels_dropped(monkeypatch, voice_turn, label):
+    """Whisper's bracketed non-speech labels never reach Hermes (ambient
+    TV/room audio must not trigger a reply). Same drop path as silence."""
+    calls: list[str] = []
+
+    async def spy(text, *, force_hermes=False, session_id=None):
+        calls.append(text)
+        return "nope", "hermes"
+
+    runner = voice_turn(transcript=label, generate_reply=spy)
+    response = await runner.run()
+
+    assert response.status == 200
+    assert runner.seen[0] == control.STATUS_LISTENING
+    assert runner.seen[-1] == control.STATUS_CLEAR
+    assert control.STATUS_THINKING not in runner.seen
+    assert runner.gateway.voice_turn_active is False
+    # The transcript was dropped BEFORE the brain was consulted.
+    assert calls == []
+
+
 @pytest.mark.asyncio
 async def test_voice_turn_tts_failure_not_recorded(monkeypatch, voice_turn):
     import stackchan_mcp.tts.orchestrator as tts_orch

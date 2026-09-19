@@ -59,6 +59,15 @@ logger = logging.getLogger(__name__)
 DEFAULT_HERMES_API_URL = "http://127.0.0.1:8642"
 DEFAULT_HERMES_SESSION_ID = "stackchan-voice"
 
+#: Whisper (and whisper.cpp) tag non-speech audio with bracketed labels
+#: in the recognition language — "[MÚSICA]", "[Som de futebol]",
+#: "[Applause]", "[no speech]" etc. Ambient TV/room noise produces
+#: exactly this shape (often hallucinated onto silence), and it must
+#: never reach Hermes as a user turn: the bot would answer the TV
+#: instead of the person. A transcript consisting *only* of bracket
+#: labels is treated like an empty transcript (drop the turn).
+_NON_SPEECH_LABEL_RE = re.compile(r"^(?:\[[^\]\n]*\][\s]*)+$")
+
 #: Hermes/DeepSeek drifts chatty even with the short-answer system prompt,
 #: and the device streams audio in realtime (one 60 ms Opus frame per
 #: push into a ~2.4 s decode queue), so a long reply stretches the turn
@@ -430,6 +439,20 @@ async def _run_voice_turn(
         gateway.multiturn.reset()
         return web.json_response(
             {"ok": False, "reason": "empty transcript", "session_id": session_id}
+        )
+
+    # Non-speech bracket labels ("[Som de futebol]", "[MÚSICA]") are
+    # whisper's way of saying "no human speech here" — ambient TV noise
+    # hallucinated into a label. Never feed those to Hermes: same drop
+    # path as an empty transcript (reset multiturn, stay quiet).
+    if _NON_SPEECH_LABEL_RE.match(transcript):
+        logger.info(
+            "voice_turn: non-speech labels (%r), dropping session=%s",
+            transcript[:120], session_id,
+        )
+        gateway.multiturn.reset()
+        return web.json_response(
+            {"ok": False, "reason": "non-speech", "session_id": session_id}
         )
 
     logger.info("voice_turn: transcript=%r session=%s", transcript[:120], session_id)
