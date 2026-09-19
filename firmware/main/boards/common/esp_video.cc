@@ -385,6 +385,11 @@ void EspVideo::SetExplainUrl(const std::string& url, const std::string& token) {
     explain_token_ = token;
 }
 
+void EspVideo::SetTrackingUrl(const std::string& url, const std::string& token) {
+    tracking_url_ = url;
+    tracking_token_ = token;
+}
+
 bool EspVideo::Capture() {
     if (encoder_thread_.joinable()) {
         encoder_thread_.join();
@@ -840,6 +845,153 @@ bool EspVideo::Capture() {
     return true;
 }
 
+bool EspVideo::GetLastFrame(uint8_t** data, size_t* len, uint32_t* pix_fmt,
+                            uint16_t* width, uint16_t* height) const
+{
+    if (frame_.data == nullptr || frame_.len == 0) {
+        return false;
+    }
+    if (data) *data = frame_.data;
+    if (len) *len = frame_.len;
+    if (pix_fmt) *pix_fmt = frame_.format;
+    if (width) *width = frame_.width;
+    if (height) *height = frame_.height;
+    return true;
+}
+
+// Capture the latest frame, JPEG-encode it rapidly (low quality) and
+// POST it to explain_url_ as a multipart "file" field ONLY (no question
+// field), returning the server's raw response string. Mirrors the
+// encoder-thread + chunked multipart pattern of Explain(); the body is
+// compiled out unless CONFIG_STACKCHAN_FRAME_PUSH=y (stub returns "").
+std::string EspVideo::PushFrameForTracking(int jpeg_quality)
+{
+#if CONFIG_STACKCHAN_FRAME_PUSH
+    // encoder_thread_ is shared with Explain(); a simple mutex serializes the
+    // whole encode+upload critical section against a concurrent call.
+    // NOTE the remaining race: a Capture() here and in another caller can
+    // still interleave, since Capture() itself is not locked — acceptable for
+    // the singlesteam camera used here.
+    std::lock_guard<std::mutex> lock(encoder_mutex_);
+
+    const bool use_tracking = !tracking_url_.empty();
+    const std::string& target_url = use_tracking ? tracking_url_ : explain_url_;
+    const std::string& target_token = use_tracking ? tracking_token_ : explain_token_;
+    if (target_url.empty() || !Capture()) {
+        return "";
+    }
+
+    // Encode the refreshed frame to a low-quality JPEG in a detached thread.
+    QueueHandle_t jpeg_queue = xQueueCreate(40, sizeof(JpegChunk));
+    if (jpeg_queue == nullptr) {
+        return "";
+    }
+    encoder_thread_ = std::thread([this, jpeg_queue, jpeg_quality]() {
+        uint16_t w = frame_.width ? frame_.width : 320;
+        uint16_t h = frame_.height ? frame_.height : 240;
+        bool ok = image_to_jpeg_cb(
+            frame_.data, frame_.len, w, h, frame_.format, jpeg_quality,
+            [](void* arg, size_t index, const void* data, size_t len) -> size_t {
+                auto jpeg_queue = static_cast<QueueHandle_t>(arg);
+                JpegChunk chunk = {.data = nullptr, .len = len};
+                if (index == 0 && data != nullptr && len > 0) {
+                    chunk.data = (uint8_t*)heap_caps_aligned_alloc(16, len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                    if (chunk.data == nullptr) {
+                        chunk.len = 0;
+                    } else {
+                        memcpy(chunk.data, data, len);
+                    }
+                } else {
+                    chunk.len = 0;  // Sentinel or error
+                }
+                xQueueSend(jpeg_queue, &chunk, portMAX_DELAY);
+                return len;
+            },
+            jpeg_queue);
+        if (!ok) {
+            JpegChunk chunk = {.data = nullptr, .len = 0};
+            xQueueSend(jpeg_queue, &chunk, portMAX_DELAY);
+        }
+    });
+
+    auto network = Board::GetInstance().GetNetwork();
+    auto http = network->CreateHttp(3);
+    std::string boundary = "----ESP32_CAMERA_BOUNDARY";
+
+    http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
+    http->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
+    if (!target_token.empty()) {
+        http->SetHeader("Authorization", "Bearer " + target_token);
+    }
+    http->SetHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
+    http->SetHeader("Transfer-Encoding", "chunked");
+    if (!http->Open("POST", target_url)) {
+        // Connection failed: drain the queue and clean up the encoder thread.
+        encoder_thread_.join();
+        JpegChunk chunk;
+        while (xQueueReceive(jpeg_queue, &chunk, portMAX_DELAY) == pdPASS) {
+            if (chunk.data != nullptr) {
+                heap_caps_free(chunk.data);
+            } else {
+                break;
+            }
+        }
+        vQueueDelete(jpeg_queue);
+        return "";
+    }
+
+    {
+        // File field header only (no question field for the push path).
+        std::string file_header;
+        file_header += "--" + boundary + "\r\n";
+        file_header += "Content-Disposition: form-data; name=\"file\"; filename=\"camera.jpg\"\r\n";
+        file_header += "Content-Type: image/jpeg\r\n";
+        file_header += "\r\n";
+        http->Write(file_header.c_str(), file_header.size());
+    }
+
+    // JPEG data chunks.
+    size_t total_sent = 0;
+    bool saw_terminator = false;
+    while (true) {
+        JpegChunk chunk;
+        if (xQueueReceive(jpeg_queue, &chunk, portMAX_DELAY) != pdPASS) {
+            break;
+        }
+        if (chunk.data == nullptr) {
+            saw_terminator = true;
+            break;  // The last chunk
+        }
+        http->Write((const char*)chunk.data, chunk.len);
+        total_sent += chunk.len;
+        heap_caps_free(chunk.data);
+    }
+    encoder_thread_.join();
+    vQueueDelete(jpeg_queue);
+
+    if (!saw_terminator || total_sent == 0) {
+        return "";
+    }
+
+    {
+        // Multipart tail.
+        std::string multipart_footer = "\r\n--" + boundary + "--\r\n";
+        http->Write(multipart_footer.c_str(), multipart_footer.size());
+    }
+    http->Write("", 0);
+
+    if (http->GetStatusCode() != 200) {
+        return "";
+    }
+    std::string result = http->ReadAll();
+    http->Close();
+    return result;
+#else
+    (void)jpeg_quality;
+    return "";
+#endif  // CONFIG_STACKCHAN_FRAME_PUSH
+}
+
 bool EspVideo::SetHMirror(bool enabled) {
     if (video_fd_ < 0)
         return false;
@@ -898,6 +1050,7 @@ bool EspVideo::SetVFlip(bool enabled) {
  * @warning 如果摄像头缓冲区为空或网络连接失败，将返回错误信息
  */
 std::string EspVideo::Explain(const std::string& question) {
+    std::lock_guard<std::mutex> lock(encoder_mutex_);
     if (explain_url_.empty()) {
         throw std::runtime_error("Image explain URL or token is not set");
     }
