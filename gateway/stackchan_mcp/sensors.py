@@ -76,7 +76,6 @@ GESTURE_BANK0 = 0x00
 GESTURE_PART_ID_L = 0x00  # bank0: 0x00=LSB(0x20), 0x01=MSB(0x76) -> 0x7620
 GESTURE_PART_ID_EXPECTED = 0x7620
 GESTURE_RESULT_0 = 0x43  # bit flags below
-GESTURE_RESULT_1 = 0x44  # bit0 = wave
 
 # GES_RESULT_0 bit -> name. Direction depends on physical mount; verify
 # and remap on-device if up/down or left/right come out swapped.

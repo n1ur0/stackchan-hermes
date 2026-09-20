@@ -89,7 +89,6 @@ _OPUS_TAGS_MAGIC = b"OpusTags"
 
 _HEADER_BOS = 0x02
 _HEADER_EOS = 0x04
-_HEADER_CONTINUED = 0x01
 
 
 def _build_ogg_crc_table() -> list[int]:
