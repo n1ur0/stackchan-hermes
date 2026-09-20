@@ -2,13 +2,13 @@
 
 import os
 
-from stackchan_mcp import activity_log, http_server
-from stackchan_mcp.http_server import (
+from stackchan_mcp import activity_log, control_http
+from stackchan_mcp.control_http import (
     _gather_activity,
     _list_presence_reports,
-    _parse_limit,
     _read_cron_runs,
 )
+from stackchan_mcp.http_common import parse_activity_feed_limit as _parse_limit
 
 
 # --- _parse_limit -----------------------------------------------------------
@@ -46,7 +46,7 @@ def _setup_sources(monkeypatch, tmp_path):
     monkeypatch.setenv("STACKCHAN_PRESENCE_REPORT", str(reports))
     # Neutralize the real /tmp Obsidian cron logs so these merge tests stay
     # deterministic on a live razer-server (where those logs exist).
-    monkeypatch.setattr(http_server, "CRON_JOBS", ())
+    monkeypatch.setattr(control_http, "CRON_JOBS", ())
     return jsonl, reports
 
 
@@ -124,7 +124,7 @@ def test_gather_includes_cron(monkeypatch, tmp_path):
     cron_log.write_text("=== self-reflect done ===\n", "utf-8")
     os.utime(cron_log, (200.0, 200.0))
     monkeypatch.setattr(
-        http_server, "CRON_JOBS", ((str(cron_log), "Self-Reflect"),)
+        control_http, "CRON_JOBS", ((str(cron_log), "Self-Reflect"),)
     )
 
     merged = _gather_activity(80, None)

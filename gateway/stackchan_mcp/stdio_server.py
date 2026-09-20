@@ -26,10 +26,6 @@ from . import web_search as web_search  # re-exported for callers/tests that pat
 from .gateway import get_gateway
 from .notify_config import NotifyConfig, load_notify_config
 from .toolkit import (
-    PRESET_DPS,
-    SPEED_DESCRIPTION,
-    SPEED_DPS_MAX,
-    _resolve_speed_dps,
     call_tool,
     list_tools,
 )

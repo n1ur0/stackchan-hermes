@@ -15,14 +15,13 @@ from stackchan_mcp.stdio_server import (
     STACKCHAN_EVENT_INSTRUCTIONS,
     STACKCHAN_EVENT_METHOD,
     STACKCHAN_JSONL_INSTRUCTIONS,
-    SPEED_DESCRIPTION,
     _build_experimental_capabilities,
     _build_stackchan_event_instructions,
     _create_initialization_options,
-    _resolve_speed_dps,
     create_server,
     notify_stackchan_event,
 )
+from stackchan_mcp.toolkit import SPEED_DESCRIPTION, _resolve_speed_dps
 from stackchan_mcp.tts import get_registry
 
 
