@@ -189,7 +189,6 @@ def test_env_float_invalid_falls_back_and_warns(monkeypatch, caplog):
     assert "STACKCHAN_LOCAL_LLM_TIMEOUT_S" in caplog.text
 
 
-@pytest.mark.asyncio
 async def test_ask_local_survives_invalid_timeout_env(
     monkeypatch, aiohttp_unused_port
 ):
@@ -230,7 +229,6 @@ async def _run_ollama_stub(
     return runner, f"http://127.0.0.1:{port}"
 
 
-@pytest.mark.asyncio
 async def test_ask_local_success(monkeypatch, aiohttp_unused_port):
     """Happy path: payload carries model / stream=false / keep_alive and
     the system prompt; reply text comes back. A non-date turn must NOT
@@ -266,7 +264,6 @@ async def test_ask_local_success(monkeypatch, aiohttp_unused_port):
     assert payload["messages"][1] == {"role": "user", "content": "hello"}
 
 
-@pytest.mark.asyncio
 async def test_ask_local_injects_date_only_on_date_query(
     monkeypatch, aiohttp_unused_port
 ):
@@ -292,7 +289,6 @@ async def test_ask_local_injects_date_only_on_date_query(
     assert local_llm.LOCAL_NO_TOOLS_LINE in system
 
 
-@pytest.mark.asyncio
 async def test_ask_local_no_date_on_vague_turn(monkeypatch, aiohttp_unused_port):
     """Regression: a vague non-date turn ("uh") must not carry the date,
     so the local model cannot volunteer it unprompted."""
@@ -317,7 +313,6 @@ async def test_ask_local_no_date_on_vague_turn(monkeypatch, aiohttp_unused_port)
     assert "weekday" not in system
 
 
-@pytest.mark.asyncio
 async def test_ask_local_strips_think_tags(monkeypatch, aiohttp_unused_port):
     """Reasoning-model <think> blocks never reach the TTS pipeline."""
 
@@ -343,7 +338,6 @@ async def test_ask_local_strips_think_tags(monkeypatch, aiohttp_unused_port):
     assert reply == "yes, Thursday."
 
 
-@pytest.mark.asyncio
 async def test_ask_local_error_status_raises(monkeypatch, aiohttp_unused_port):
     """Non-200 from Ollama raises RuntimeError (caller falls back)."""
 
@@ -361,7 +355,6 @@ async def test_ask_local_error_status_raises(monkeypatch, aiohttp_unused_port):
         await runner.cleanup()
 
 
-@pytest.mark.asyncio
 async def test_ask_local_empty_reply_raises(monkeypatch, aiohttp_unused_port):
     """Empty / missing content raises RuntimeError (caller falls back)."""
 
@@ -379,7 +372,6 @@ async def test_ask_local_empty_reply_raises(monkeypatch, aiohttp_unused_port):
         await runner.cleanup()
 
 
-@pytest.mark.asyncio
 async def test_ask_local_without_model_raises(monkeypatch):
     monkeypatch.delenv("STACKCHAN_LOCAL_LLM_MODEL", raising=False)
     with pytest.raises(RuntimeError, match="STACKCHAN_LOCAL_LLM_MODEL"):
@@ -389,7 +381,6 @@ async def test_ask_local_without_model_raises(monkeypatch):
 # --- generate_reply (routing + fallback in the voice bridge) ------------------
 
 
-@pytest.mark.asyncio
 async def test_generate_reply_disabled_uses_hermes(monkeypatch):
     """Without STACKCHAN_LOCAL_LLM_MODEL the local path is never touched —
     identical to the pre-routing behaviour."""
@@ -413,7 +404,6 @@ async def test_generate_reply_disabled_uses_hermes(monkeypatch):
     assert calls == ["good morning"]
 
 
-@pytest.mark.asyncio
 async def test_generate_reply_routes_short_turn_local(monkeypatch):
     monkeypatch.setenv("STACKCHAN_LOCAL_LLM_MODEL", "test-model:q4")
 
@@ -434,7 +424,6 @@ async def test_generate_reply_routes_short_turn_local(monkeypatch):
     assert (reply, route) == ("local reply", "local")
 
 
-@pytest.mark.asyncio
 async def test_generate_reply_long_turn_goes_hermes(monkeypatch):
     """Routing enabled, but a deliberation-grade turn still goes to Hermes."""
     monkeypatch.setenv("STACKCHAN_LOCAL_LLM_MODEL", "test-model:q4")
@@ -454,7 +443,6 @@ async def test_generate_reply_long_turn_goes_hermes(monkeypatch):
     assert (reply, route) == ("hermes reply", "hermes")
 
 
-@pytest.mark.asyncio
 async def test_generate_reply_local_failure_falls_back(monkeypatch):
     """Ollama down / timeout / bad reply → the turn survives via Hermes."""
     monkeypatch.setenv("STACKCHAN_LOCAL_LLM_MODEL", "test-model:q4")
@@ -474,7 +462,6 @@ async def test_generate_reply_local_failure_falls_back(monkeypatch):
     assert (reply, route) == ("hermes reply", "hermes")
 
 
-@pytest.mark.asyncio
 async def test_generate_reply_hermes_failure_still_raises(monkeypatch):
     """A Hermes failure propagates as before — fallback only covers local."""
     monkeypatch.delenv("STACKCHAN_LOCAL_LLM_MODEL", raising=False)

@@ -58,7 +58,6 @@ def fake_encode(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_send_pcm_audio_pushes_frames_with_state_brackets(fake_encode):
     """PCM gets encoded, bracketed by start/stop, and pushed as frames."""
     # 90 ms of PCM at 16 kHz mono = 1440 samples = 2880 bytes → 2 frames
@@ -83,7 +82,6 @@ async def test_send_pcm_audio_pushes_frames_with_state_brackets(fake_encode):
     assert all(kind == "frame" for kind, _ in middle)
 
 
-@pytest.mark.asyncio
 async def test_send_pcm_audio_default_source_label(fake_encode):
     """Without ``source_label`` the return dict tags the push as 'external'."""
     pcm = b"\x01\x00" * 960
@@ -100,7 +98,6 @@ async def test_send_pcm_audio_default_source_label(fake_encode):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_send_pcm_audio_resamples_when_source_rate_differs(
     fake_encode, monkeypatch,
 ):
@@ -137,7 +134,6 @@ async def test_send_pcm_audio_resamples_when_source_rate_differs(
     assert seen_resample == {"src": 32000, "dst": DEVICE_SAMPLE_RATE}
 
 
-@pytest.mark.asyncio
 async def test_send_pcm_audio_skips_resample_at_device_rate(
     fake_encode, monkeypatch,
 ):
@@ -167,7 +163,6 @@ async def test_send_pcm_audio_skips_resample_at_device_rate(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_send_pcm_audio_rejects_empty_pcm(fake_encode):
     """Empty PCM is a bug at the call site, surfaced as a RuntimeError."""
     esp32 = _FakeESP32(connected=True)
@@ -180,14 +175,12 @@ async def test_send_pcm_audio_rejects_empty_pcm(fake_encode):
     assert esp32.frames == []
 
 
-@pytest.mark.asyncio
 async def test_send_pcm_audio_rejects_missing_gateway():
     """No gateway means nowhere to push; fail with a clear message."""
     with pytest.raises(RuntimeError, match="gateway"):
         await send_pcm_audio(None, b"\x01\x00" * 960)  # type: ignore[arg-type]
 
 
-@pytest.mark.asyncio
 async def test_send_pcm_audio_rejects_disconnected_device(fake_encode):
     """Disconnected device fails fast without sending state notifications."""
     esp32 = _FakeESP32(connected=False)
@@ -205,7 +198,6 @@ async def test_send_pcm_audio_rejects_disconnected_device(fake_encode):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_send_pcm_audio_blocks_protocol_v2(fake_encode):
     """Devices on v2 binary protocol get clear errors, not silent failure."""
     from types import SimpleNamespace
@@ -221,7 +213,6 @@ async def test_send_pcm_audio_blocks_protocol_v2(fake_encode):
     assert esp32.frames == []
 
 
-@pytest.mark.asyncio
 async def test_send_pcm_audio_blocks_protocol_v3(fake_encode):
     """v3 is blocked the same way as v2."""
     from types import SimpleNamespace
@@ -242,7 +233,6 @@ async def test_send_pcm_audio_blocks_protocol_v3(fake_encode):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_send_pcm_audio_serialises_concurrent_pushes(fake_encode):
     """Two concurrent ``send_pcm_audio`` calls do not interleave frames.
 
@@ -284,7 +274,6 @@ async def test_send_pcm_audio_serialises_concurrent_pushes(fake_encode):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_send_pcm_audio_translates_mid_stream_disconnect(fake_encode):
     """A ConnectionError from the device mid-stream becomes a RuntimeError.
 
@@ -326,7 +315,6 @@ async def test_send_pcm_audio_translates_mid_stream_disconnect(fake_encode):
     assert "stop" in esp32.tts_states
 
 
-@pytest.mark.asyncio
 async def test_send_pcm_audio_translates_disconnect_before_start(fake_encode):
     """ConnectionError on the start notification is reported clearly.
 
@@ -359,7 +347,6 @@ async def test_send_pcm_audio_translates_disconnect_before_start(fake_encode):
     assert esp32.tts_states == ["start"]
 
 
-@pytest.mark.asyncio
 async def test_send_pcm_audio_translates_opus_encode_error(
     fake_encode, monkeypatch,
 ):
@@ -384,7 +371,6 @@ async def test_send_pcm_audio_translates_opus_encode_error(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_send_pcm_audio_paces_frames_at_device_rate(
     fake_encode, monkeypatch,
 ):

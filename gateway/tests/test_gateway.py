@@ -119,7 +119,6 @@ def test_vision_token_falls_back_to_stackchan_token(monkeypatch):
     assert gw.vision_token == "ws-token"
 
 
-@pytest.mark.asyncio
 async def test_gateway_start_stop(monkeypatch):
     """Gateway can start and stop."""
     monkeypatch.setenv("WS_PORT", "0")  # Random port
@@ -139,7 +138,6 @@ async def test_gateway_start_stop(monkeypatch):
     assert ("esp32_stop",) in calls
 
 
-@pytest.mark.asyncio
 async def test_gateway_start_advertises_mdns_by_default(monkeypatch):
     """Gateway.start() starts mDNS advertising after listeners are ready."""
     import stackchan_mcp.gateway as gw_mod
@@ -168,7 +166,6 @@ async def test_gateway_start_advertises_mdns_by_default(monkeypatch):
     assert calls == [("start", "0.0.0.0", 0, "/"), ("stop",)]
 
 
-@pytest.mark.asyncio
 async def test_gateway_start_can_disable_mdns(monkeypatch):
     """Gateway.start(advertise_mdns=False) skips mDNS advertising."""
     import stackchan_mcp.gateway as gw_mod
@@ -190,7 +187,6 @@ async def test_gateway_start_can_disable_mdns(monkeypatch):
     await gw.stop()
 
 
-@pytest.mark.asyncio
 async def test_gateway_mdns_start_failure_does_not_abort(
     monkeypatch, caplog
 ):
@@ -220,7 +216,6 @@ async def test_gateway_mdns_start_failure_does_not_abort(
     await gw.stop()
 
 
-@pytest.mark.asyncio
 async def test_gateway_mdns_stop_failure_does_not_mask_shutdown(
     monkeypatch, caplog
 ):
@@ -261,7 +256,6 @@ def test_gateway_wires_device_ready_to_esp32():
     assert gw.voice_turn_active is False
 
 
-@pytest.mark.asyncio
 async def test_on_device_ready_applies_persisted_volume(monkeypatch):
     """The connection hook re-applies the persisted volume via control."""
     import stackchan_mcp.control as control

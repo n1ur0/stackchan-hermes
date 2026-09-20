@@ -36,7 +36,6 @@ async def manager():
     await mgr.stop()
 
 
-@pytest.mark.asyncio
 async def test_manager_starts_and_stops():
     """Manager can start and stop cleanly."""
     mgr = ESP32Manager()
@@ -46,7 +45,6 @@ async def test_manager_starts_and_stops():
     assert mgr._server is None
 
 
-@pytest.mark.asyncio
 async def test_no_device_connected():
     """call_tool returns error when no device is connected."""
     mgr = ESP32Manager()
@@ -56,7 +54,6 @@ async def test_no_device_connected():
     assert "not connected" in error["message"].lower() or "No ESP32" in error["message"]
 
 
-@pytest.mark.asyncio
 async def test_get_status_disconnected():
     """get_status returns disconnected state."""
     mgr = ESP32Manager()
@@ -65,7 +62,6 @@ async def test_get_status_disconnected():
     assert status["device_id"] is None
 
 
-@pytest.mark.asyncio
 async def test_esp32_hello_handshake(manager):
     """ESP32 can connect and complete hello handshake."""
     async with _connect(manager) as ws:
@@ -118,7 +114,6 @@ async def test_esp32_hello_handshake(manager):
         assert status["tools_count"] == 1
 
 
-@pytest.mark.asyncio
 async def test_esp32_tool_call_relay(manager):
     """Gateway relays tool calls to ESP32."""
     async with _connect(manager) as ws:
@@ -153,7 +148,6 @@ async def test_esp32_tool_call_relay(manager):
         assert result["content"][0]["text"] == "true"
 
 
-@pytest.mark.asyncio
 async def test_esp32_disconnect_handling(manager):
     """Manager handles ESP32 disconnection gracefully."""
     async with _connect(manager) as ws:
@@ -166,7 +160,6 @@ async def test_esp32_disconnect_handling(manager):
     assert manager.device_connected is False
 
 
-@pytest.mark.asyncio
 async def test_auth_rejection(manager):
     """Unauthorized connections are rejected."""
     import os
@@ -209,7 +202,6 @@ def test_hardware_lane_covers_gateway_tool_routes(tool_name, lane):
     assert _hardware_lane(tool_name) == lane
 
 
-@pytest.mark.asyncio
 async def test_connection_pipelines_concurrent_tool_calls_before_first_response():
     """Concurrent tools/call requests are sent before either response arrives."""
     ws, conn = _make_conn(session_id="session-parallel")
@@ -257,7 +249,6 @@ async def test_connection_pipelines_concurrent_tool_calls_before_first_response(
     assert led_result[1] is None
 
 
-@pytest.mark.asyncio
 async def test_connection_removes_pending_request_when_call_is_cancelled():
     """Cancelling a tool call does not leave a stale pending response slot."""
     ws, conn = _make_conn(session_id="session-cancel")
@@ -307,7 +298,6 @@ def _gate_mgr(tool_names):
     return mgr, connection
 
 
-@pytest.mark.asyncio
 async def test_manager_call_tools_dispatches_independent_lanes_in_parallel():
     """Servo, LED, and avatar calls start together instead of waiting in line."""
     mgr, connection = _gate_mgr([
@@ -346,7 +336,6 @@ async def test_manager_call_tools_dispatches_independent_lanes_in_parallel():
     assert [error for _, error in results] == [None, None, None]
 
 
-@pytest.mark.asyncio
 async def test_manager_call_tool_uses_lane_dispatch_for_existing_api():
     """Existing single-tool API can still overlap independent hardware lanes."""
     mgr, connection = _gate_mgr([
@@ -382,7 +371,6 @@ async def test_manager_call_tool_uses_lane_dispatch_for_existing_api():
     assert [error for _, error in results] == [None, None]
 
 
-@pytest.mark.asyncio
 async def test_manager_call_tools_serializes_calls_on_same_hardware_lane():
     """Two servo calls keep their relative order on the servo lane."""
     mgr, connection = _gate_mgr([
@@ -473,7 +461,6 @@ class _FakeWebSocket:
         "listen_state_raises_after_disconnect",
     ],
 )
-@pytest.mark.asyncio
 async def test_connection_send_wire_format(session_id, method, kwargs, expected_sent, disconnect):
     """Outbound sends hit the wire in the expected shape; a disconnected
     connection refuses to send rather than silently dropping."""
@@ -502,7 +489,6 @@ async def test_connection_send_wire_format(session_id, method, kwargs, expected_
     ],
     ids=["audio_frame", "tts_state", "listen_state"],
 )
-@pytest.mark.asyncio
 async def test_manager_send_raises_without_device(method, kwargs):
     """ESP32Manager raises ConnectionError when no device is attached.
 
@@ -540,7 +526,6 @@ class _FailingWebSocket:
         raise self._exc
 
 
-@pytest.mark.asyncio
 async def test_send_audio_frame_translates_websockets_close_to_connection_error():
     """websockets.ConnectionClosed becomes ConnectionError + marks dead.
 
@@ -564,7 +549,6 @@ async def test_send_audio_frame_translates_websockets_close_to_connection_error(
     assert ws.send_calls == 1
 
 
-@pytest.mark.asyncio
 async def test_send_tts_state_translates_oserror_to_connection_error():
     """OSError on send (e.g. broken pipe) is translated to ConnectionError."""
     ws, conn = _make_conn(ws=_FailingWebSocket(OSError("broken pipe")))
@@ -574,7 +558,6 @@ async def test_send_tts_state_translates_oserror_to_connection_error():
     assert not conn.connected
 
 
-@pytest.mark.asyncio
 async def test_send_mcp_request_translates_send_failure_and_marks_disconnected():
     """tools/call send failures use the same connection-state handling as TTS."""
     ws, conn = _make_conn(ws=_FailingWebSocket(OSError("broken pipe")))
@@ -738,7 +721,6 @@ async def manager_with_hook(monkeypatch):
         await mgr.stop()
 
 
-@pytest.mark.asyncio
 async def test_device_driven_listen_pushes_to_hook(manager_with_hook):
     """device → gateway listen.start/stop sequence forwards frames
     captured between the two messages to the audio hook."""
@@ -778,7 +760,6 @@ async def test_device_driven_listen_pushes_to_hook(manager_with_hook):
     assert calls[0]["frames"] == [b"\xaa\xbb\xcc", b"\xdd\xee\xff"]
 
 
-@pytest.mark.asyncio
 async def test_device_driven_listen_disabled_when_no_hook(manager):
     """Without STACKCHAN_AUDIO_HOOK_URL the gateway ignores inbound
     listen.start (no recording slot opens, no push fires)."""
@@ -793,7 +774,6 @@ async def test_device_driven_listen_disabled_when_no_hook(manager):
         assert not is_recording()
 
 
-@pytest.mark.asyncio
 async def test_device_driven_listen_cleanup_on_disconnect(manager_with_hook):
     """Disconnecting mid-capture drops the partial buffer rather than
     leaking it into the next connection's recording slot."""
@@ -840,7 +820,6 @@ _HOOK_CASES = [
         "noop_listen_started",
     ],
 )
-@pytest.mark.asyncio
 async def test_run_hook(kind, hook_attr, run_method):
     """_run_*_hook awaits a registered callback, swallows callback errors,
     and is a quiet no-op when no callback is registered."""
@@ -865,7 +844,6 @@ async def test_run_hook(kind, hook_attr, run_method):
         assert fired.is_set()
 
 
-@pytest.mark.asyncio
 async def test_device_driven_listen_fires_listen_started(manager_with_hook):
     """The on_listen_started hook fires the instant a device-driven
     listen opens the recording slot — before the capture finishes."""

@@ -170,7 +170,6 @@ def _cleanup_recording_slot():
         stop_recording()
 
 
-@pytest.mark.asyncio
 async def test_pipeline_drives_listen_state_and_returns_text(fake_decode, fast_sleep):
     """Happy path: start/stop notifications fire, frames decode, engine runs."""
     frames = [b"opus_frame_0", b"opus_frame_1", b"opus_frame_2"]
@@ -205,7 +204,6 @@ async def test_pipeline_drives_listen_state_and_returns_text(fake_decode, fast_s
     assert not is_recording()
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("motion", "expected_tool_calls"),
     [
@@ -249,7 +247,6 @@ async def test_listen_motion_success_paths(
     assert not is_recording()
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("motion", "expected_tool_calls"),
     [
@@ -292,7 +289,6 @@ async def test_listen_motion_failure_paths(
     assert not is_recording()
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("listen_args", "error_match"),
     [
@@ -323,7 +319,6 @@ async def test_listen_rejects_invalid_options_before_any_device_call(
     assert not is_recording()
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("motion", ["face-only", "look-up"])
 async def test_listen_motion_cleanup_completes_under_cancellation(fake_decode, motion):
     """Cancellation during capture must not bypass motion cleanup.
@@ -413,7 +408,6 @@ async def test_listen_motion_cleanup_completes_under_cancellation(fake_decode, m
     assert not is_recording()
 
 
-@pytest.mark.asyncio
 async def test_listen_motion_look_up_re_cancel_during_cleanup_chains_rollback_failure(
     fake_decode,
 ):
@@ -476,7 +470,6 @@ async def test_listen_motion_look_up_re_cancel_during_cleanup_chains_rollback_fa
     )
 
 
-@pytest.mark.asyncio
 async def test_listen_motion_look_up_double_cleanup_failure_preserves_both_errors(
     fake_decode,
     fast_sleep,
@@ -546,7 +539,6 @@ async def test_listen_motion_look_up_double_cleanup_failure_preserves_both_error
     assert "idle" in faces, "idle avatar restore was attempted"
 
 
-@pytest.mark.asyncio
 async def test_listen_motion_look_up_engine_failure_with_rollback_failure_chains(
     fake_decode,
     fast_sleep,
@@ -607,7 +599,6 @@ async def test_listen_motion_look_up_engine_failure_with_rollback_failure_chains
     assert 24.0 in pitches_attempted
 
 
-@pytest.mark.asyncio
 async def test_listen_motion_look_up_nested_partial_failure_surfaces_rollback_error(
     fake_decode,
     fast_sleep,
@@ -673,7 +664,6 @@ async def test_listen_motion_look_up_nested_partial_failure_surfaces_rollback_er
     assert 24.0 in pitches_attempted, "rollback saved pitch was attempted"
 
 
-@pytest.mark.asyncio
 async def test_listen_motion_look_up_partial_rollback_still_restores_avatar(
     fake_decode,
     fast_sleep,
@@ -721,7 +711,6 @@ async def test_listen_motion_look_up_partial_rollback_still_restores_avatar(
     )
 
 
-@pytest.mark.asyncio
 async def test_pipeline_returns_empty_text_on_no_frames(fake_decode, fast_sleep):
     """An empty capture returns text='' without invoking the engine —
     silence for the full window is not an error.
@@ -741,7 +730,6 @@ async def test_pipeline_returns_empty_text_on_no_frames(fake_decode, fast_sleep)
     assert env.engine.calls == []
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("esp32_kwargs", "error_match"),
     [
@@ -768,7 +756,6 @@ async def test_pipeline_rejects_unsupported_device_state(
     assert not is_recording()
 
 
-@pytest.mark.asyncio
 async def test_pipeline_declines_when_device_driven_capture_active():
     """MCP listen() declines when the audio_stream slot is already held
     by a device-driven capture, preserving the active buffer.
@@ -794,7 +781,6 @@ async def test_pipeline_declines_when_device_driven_capture_active():
     assert is_recording()
 
 
-@pytest.mark.asyncio
 async def test_pipeline_translates_disconnect_before_listen_start(
     fake_decode, fast_sleep
 ):
@@ -820,7 +806,6 @@ async def test_pipeline_translates_disconnect_before_listen_start(
     assert env.engine.calls == []
 
 
-@pytest.mark.asyncio
 async def test_pipeline_translates_engine_error_to_runtime_error(
     fake_decode, fast_sleep
 ):
@@ -843,7 +828,6 @@ async def test_pipeline_translates_engine_error_to_runtime_error(
     assert not is_recording()
 
 
-@pytest.mark.asyncio
 async def test_pipeline_value_error_propagates_as_value_error(fake_decode, fast_sleep):
     """ValueError from the engine stays a ValueError."""
     env = _build_env(exc=ValueError("bad language hint"), frames_to_inject=[b"opus_a"])
@@ -856,7 +840,6 @@ async def test_pipeline_value_error_propagates_as_value_error(fake_decode, fast_
         )
 
 
-@pytest.mark.asyncio
 async def test_pipeline_sends_listen_stop_on_cancellation(fake_decode):
     """A cancelled listen() still tells the device to stop — the shielded
     listen.stop send guarantees the firmware leaves listening mode even
@@ -891,7 +874,6 @@ async def test_pipeline_sends_listen_stop_on_cancellation(fake_decode):
     assert env.engine.calls == []
 
 
-@pytest.mark.asyncio
 async def test_pipeline_serialises_concurrent_listen_calls(fake_decode, fast_sleep):
     """Concurrent listen() calls are serialised by listen_lock so the
     recording slot stays strictly sequential: start_0 < stop_0 <

@@ -91,7 +91,6 @@ def test_default_engine_constant():
     assert DEFAULT_ENGINE == "faster-whisper"
 
 
-@pytest.mark.asyncio
 async def test_listen_rejects_non_int_duration():
     """Non-integer duration_ms -> ValueError before any engine lookup."""
     reg = EngineRegistry()
@@ -101,7 +100,6 @@ async def test_listen_rejects_non_int_duration():
         )
 
 
-@pytest.mark.asyncio
 async def test_listen_rejects_boolean_duration():
     """``bool`` is a subclass of int — guard against it explicitly."""
     reg = EngineRegistry()
@@ -111,7 +109,6 @@ async def test_listen_rejects_boolean_duration():
         )
 
 
-@pytest.mark.asyncio
 async def test_listen_rejects_duration_below_minimum():
     """duration_ms < 100 -> ValueError."""
     reg = EngineRegistry()
@@ -121,7 +118,6 @@ async def test_listen_rejects_duration_below_minimum():
         )
 
 
-@pytest.mark.asyncio
 async def test_listen_rejects_duration_above_maximum():
     """duration_ms > 30000 -> ValueError."""
     reg = EngineRegistry()
@@ -131,7 +127,6 @@ async def test_listen_rejects_duration_above_maximum():
         )
 
 
-@pytest.mark.asyncio
 async def test_listen_unregistered_engine_raises():
     """Unregistered engine -> NotImplementedError, listing what's available."""
     reg = EngineRegistry()
@@ -145,7 +140,6 @@ async def test_listen_unregistered_engine_raises():
     assert "(none)" in msg
 
 
-@pytest.mark.asyncio
 async def test_listen_engine_default_falls_back():
     """Empty/missing 'engine' falls back to DEFAULT_ENGINE."""
     reg = EngineRegistry()
@@ -165,7 +159,6 @@ async def test_listen_engine_default_falls_back():
     assert DEFAULT_ENGINE in str(exc_info.value)
 
 
-@pytest.mark.asyncio
 async def test_listen_requires_gateway():
     """Validation passes but pipeline refuses without a gateway argument."""
     reg = EngineRegistry()
@@ -177,7 +170,6 @@ async def test_listen_requires_gateway():
         )
 
 
-@pytest.mark.asyncio
 async def test_listen_lists_available_engines_in_error():
     """Error message names what *is* registered so callers can pick correctly."""
     reg = EngineRegistry()

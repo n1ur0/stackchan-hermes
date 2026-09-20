@@ -99,7 +99,6 @@ async def hermes_stub(monkeypatch, aiohttp_unused_port):
     ],
     ids=["default-voice-prompt", "custom-env-prompt", "explicit-overrides-env"],
 )
-@pytest.mark.asyncio
 async def test_ask_hermes_system_prompt_composition(
     monkeypatch, hermes_stub, env_prompt, explicit_prompt, user_text, content
 ):
@@ -133,7 +132,6 @@ async def test_ask_hermes_system_prompt_composition(
     assert received["payload"]["messages"][1] == {"role": "user", "content": user_text}
 
 
-@pytest.mark.asyncio
 async def test_ask_hermes_error_status_raises(monkeypatch, hermes_stub):
     """An upstream HTTP error surfaces as RuntimeError with the status."""
     received, coop = hermes_stub
@@ -159,7 +157,6 @@ async def test_ask_hermes_error_status_raises(monkeypatch, hermes_stub):
     ],
     ids=["explicit-session-id", "env-fallback-session-id", "no-key-no-session-header"],
 )
-@pytest.mark.asyncio
 async def test_ask_hermes_sends_conversation_session_id(
     monkeypatch,
     hermes_stub,
@@ -420,7 +417,6 @@ def voice_turn(monkeypatch):
 # ---- Phase F: voice-turn status-text feedback ------------------------
 
 
-@pytest.mark.asyncio
 async def test_voice_turn_status_text_sequence(monkeypatch, voice_turn):
     runner = voice_turn(transcript="good morning", reply="hey")
     response = await runner.run()
@@ -438,7 +434,6 @@ async def test_voice_turn_status_text_sequence(monkeypatch, voice_turn):
     assert runner.gateway._interactions == 1
 
 
-@pytest.mark.asyncio
 async def test_voice_turn_clears_status_on_empty_transcript(monkeypatch, voice_turn):
     runner = voice_turn(transcript="   ")
     response = await runner.run()
@@ -451,7 +446,6 @@ async def test_voice_turn_clears_status_on_empty_transcript(monkeypatch, voice_t
     assert runner.gateway.voice_turn_active is False
 
 
-@pytest.mark.asyncio
 async def test_voice_turn_clears_status_when_brain_fails(monkeypatch, voice_turn):
     async def boom(text, *, force_hermes=False, session_id=None, on_step=None):
         raise RuntimeError("hermes down")
@@ -467,7 +461,6 @@ async def test_voice_turn_clears_status_when_brain_fails(monkeypatch, voice_turn
 # ---- Phase F: subtitle / route badge / LED on the response phase ------
 
 
-@pytest.mark.asyncio
 async def test_voice_turn_hermes_route_sets_badge_and_led(monkeypatch, voice_turn):
     runner = voice_turn(
         transcript="weather?", reply="sunny", route="hermes", route_hint="hermes"
@@ -483,7 +476,6 @@ async def test_voice_turn_hermes_route_sets_badge_and_led(monkeypatch, voice_tur
     assert runner.rec["led"] == ["listening", "hermes", "hermes", "idle"]
 
 
-@pytest.mark.asyncio
 async def test_voice_turn_local_route_no_badge_no_led(monkeypatch, voice_turn):
     runner = voice_turn(
         transcript="hey", reply="hey", route="local", route_hint="local"
@@ -499,7 +491,6 @@ async def test_voice_turn_local_route_no_badge_no_led(monkeypatch, voice_turn):
     assert runner.rec["led"] == ["listening", "idle"]
 
 
-@pytest.mark.asyncio
 async def test_voice_turn_clears_cosmetics_when_tts_fails(monkeypatch, voice_turn):
     import stackchan_mcp.tts.orchestrator as tts_orch
 
@@ -522,7 +513,6 @@ async def test_voice_turn_clears_cosmetics_when_tts_fails(monkeypatch, voice_tur
 # ---- conversation log recording hook ---------------------------------
 
 
-@pytest.mark.asyncio
 async def test_voice_turn_records_conversation(monkeypatch, voice_turn):
     control._CONVERSATION.clear()
     runner = voice_turn(transcript="good morning", reply="hey", route="local")
@@ -539,7 +529,6 @@ async def test_voice_turn_records_conversation(monkeypatch, voice_turn):
     control._CONVERSATION.clear()
 
 
-@pytest.mark.asyncio
 async def test_voice_turn_empty_transcript_not_recorded(monkeypatch, voice_turn):
     control._CONVERSATION.clear()
     runner = voice_turn(transcript="   ")
@@ -560,7 +549,6 @@ async def test_voice_turn_empty_transcript_not_recorded(monkeypatch, voice_turn)
         "[Applause]  [Music]",
     ],
 )
-@pytest.mark.asyncio
 async def test_voice_turn_non_speech_labels_dropped(monkeypatch, voice_turn, label):
     """Whisper's bracketed non-speech labels never reach Hermes (ambient
     TV/room audio must not trigger a reply). Same drop path as silence."""
@@ -582,7 +570,6 @@ async def test_voice_turn_non_speech_labels_dropped(monkeypatch, voice_turn, lab
     assert calls == []
 
 
-@pytest.mark.asyncio
 async def test_voice_turn_tts_failure_not_recorded(monkeypatch, voice_turn):
     import stackchan_mcp.tts.orchestrator as tts_orch
 
@@ -614,7 +601,6 @@ async def test_voice_turn_tts_failure_not_recorded(monkeypatch, voice_turn):
     ],
     ids=["default-keeps-local", "force-hermes-bypasses-local"],
 )
-@pytest.mark.asyncio
 async def test_generate_reply_routing_by_force_flag(monkeypatch, force, expected):
     monkeypatch.setattr(local_llm, "is_enabled", lambda: True)
     monkeypatch.setattr(local_llm, "decide_route", lambda _t: local_llm.ROUTE_LOCAL)
@@ -637,7 +623,6 @@ async def test_generate_reply_routing_by_force_flag(monkeypatch, force, expected
         assert called["local"] is False  # the local fast-path was skipped
 
 
-@pytest.mark.asyncio
 async def test_voice_turn_force_hermes_lights_hermes_and_passes_flag(
     monkeypatch, voice_turn
 ):
@@ -675,7 +660,6 @@ def _enable_multiturn(monkeypatch, *, muted: bool = False) -> None:
     monkeypatch.setattr(control, "is_muted", lambda: muted)
 
 
-@pytest.mark.asyncio
 async def test_multiturn_reopens_listen_on_hermes_question(monkeypatch, voice_turn):
     runner = voice_turn(transcript="hey", reply="how have you been?", route="hermes")
     _enable_multiturn(monkeypatch)
@@ -691,7 +675,6 @@ async def test_multiturn_reopens_listen_on_hermes_question(monkeypatch, voice_tu
     assert body["multiturn"] is True
 
 
-@pytest.mark.asyncio
 async def test_multiturn_off_by_default(monkeypatch, voice_turn):
     # No STACKCHAN_MULTITURN env: feature disabled even on a question.
     monkeypatch.delenv("STACKCHAN_MULTITURN", raising=False)
@@ -714,7 +697,6 @@ async def test_multiturn_off_by_default(monkeypatch, voice_turn):
     ],
     ids=["local-route", "non-question", "muted", "disconnected"],
 )
-@pytest.mark.asyncio
 async def test_multiturn_skips_relisten(
     monkeypatch, voice_turn, route, reply, muted, connected
 ):
@@ -729,7 +711,6 @@ async def test_multiturn_skips_relisten(
     assert runner.gateway.multiturn_active is False
 
 
-@pytest.mark.asyncio
 async def test_multiturn_stops_at_ceiling(monkeypatch, voice_turn):
     runner = voice_turn(transcript="hey", reply="keep going?", route="hermes")
     _enable_multiturn(monkeypatch)
@@ -747,7 +728,6 @@ async def test_multiturn_stops_at_ceiling(monkeypatch, voice_turn):
     assert runner.gateway.multiturn.turn_count == 0
 
 
-@pytest.mark.asyncio
 async def test_multiturn_ceiling_on_question_shows_tap_hint(monkeypatch, voice_turn):
     # Phase 3 UX: when we stop only because the turn ceiling was hit while
     # Hermes still had an open question, leave a "tap to continue" subtitle
@@ -769,7 +749,6 @@ async def test_multiturn_ceiling_on_question_shows_tap_hint(monkeypatch, voice_t
     assert runner.gateway.multiturn_prompt_pending is False
 
 
-@pytest.mark.asyncio
 async def test_multiturn_no_hint_on_normal_end(monkeypatch, voice_turn):
     # A non-question end clears the subtitle as before — the hint is only
     # for the ceiling-on-question case, not every conversation close.
@@ -782,7 +761,6 @@ async def test_multiturn_no_hint_on_normal_end(monkeypatch, voice_turn):
     assert runner.rec["subtitle"][-1] == ""
 
 
-@pytest.mark.asyncio
 async def test_multiturn_empty_transcript_resets_counter(monkeypatch, voice_turn):
     runner = voice_turn(transcript="   ", reply="ignored", route="hermes")
     _enable_multiturn(monkeypatch)
@@ -797,7 +775,6 @@ async def test_multiturn_empty_transcript_resets_counter(monkeypatch, voice_turn
     assert runner.gateway.multiturn.turn_count == 0
 
 
-@pytest.mark.asyncio
 async def test_voice_turn_threads_rotating_conversation_id(monkeypatch, voice_turn):
     """Phase 2: the voice turn threads a per-conversation Hermes session id
     into the brain call — reused within the context window, rotated past it."""
@@ -825,7 +802,6 @@ async def test_voice_turn_threads_rotating_conversation_id(monkeypatch, voice_tu
     assert seen[2] != seen[0]  # rotated after the window
 
 
-@pytest.mark.asyncio
 async def test_voice_turn_window_zero_uses_one_persistent_session(
     monkeypatch, voice_turn
 ):
@@ -851,7 +827,6 @@ async def test_voice_turn_window_zero_uses_one_persistent_session(
     assert seen == ["api_test_1", "api_test_1"]
 
 
-@pytest.mark.asyncio
 async def test_multiturn_stale_gap_resets_at_turn_entry(monkeypatch, voice_turn):
     runner = voice_turn(transcript="hey", reply="right.", route="hermes")
     _enable_multiturn(monkeypatch)
@@ -869,7 +844,6 @@ async def test_multiturn_stale_gap_resets_at_turn_entry(monkeypatch, voice_turn)
     assert runner.gateway.multiturn_active is False
 
 
-@pytest.mark.asyncio
 async def test_multiturn_continuation_skips_display_clear(monkeypatch, voice_turn):
     # When a turn re-opens listening, the finally must NOT clear the
     # status text (on_listen_started owns the listening display now).
@@ -974,7 +948,6 @@ def _sse_body(*, tool: str | None = None, label: str = "", reply: str = "ok") ->
     return "\n".join(lines)
 
 
-@pytest.mark.asyncio
 async def test_ask_hermes_stream_surfaces_tool_steps(monkeypatch, aiohttp_unused_port):
     """tool.started SSE events reach on_step; reply is assembled."""
     received: dict[str, Any] = {}
@@ -1012,7 +985,6 @@ async def test_ask_hermes_stream_surfaces_tool_steps(monkeypatch, aiohttp_unused
     assert HERMES_VOICE_TOOLS_LINE in instructions
 
 
-@pytest.mark.asyncio
 async def test_ask_hermes_stream_empty_reply_raises(monkeypatch, aiohttp_unused_port):
     """A stream with no content deltas surfaces as RuntimeError."""
 
@@ -1053,7 +1025,6 @@ async def _run_hermes_json_stub(handler, aiohttp_unused_port):
     return runner, f"http://127.0.0.1:{port}"
 
 
-@pytest.mark.asyncio
 async def test_create_hermes_session_accepts_201_and_returns_id(
     monkeypatch, aiohttp_unused_port
 ):
@@ -1077,7 +1048,6 @@ async def test_create_hermes_session_accepts_201_and_returns_id(
     assert session_id == "api_123"
 
 
-@pytest.mark.asyncio
 async def test_create_hermes_session_missing_id_raises(
     monkeypatch, aiohttp_unused_port
 ):

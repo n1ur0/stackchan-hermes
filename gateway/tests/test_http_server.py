@@ -135,7 +135,6 @@ class GatedCommandQueue(CommandQueue):
         await self.allow_get.wait()
         return await super().get()
 
-@pytest.mark.asyncio
 async def test_queue_ordering_fifo_completion() -> None:
     queue = CommandQueue(capacity=3)
     observed: list[str] = []
@@ -170,7 +169,6 @@ async def test_queue_ordering_fifo_completion() -> None:
     assert observed == ["tool-0", "tool-1", "tool-2"]
     assert results == observed
 
-@pytest.mark.asyncio
 async def test_queue_full_returns_jsonrpc_error_response() -> None:
     queue = CommandQueue(capacity=1)
     app = build_app(
@@ -202,7 +200,6 @@ async def test_queue_full_returns_jsonrpc_error_response() -> None:
     assert payload["id"] == 11
     assert payload["error"] == build_queue_full_error(1)
 
-@pytest.mark.asyncio
 async def test_cancelled_client_item_is_not_dispatched() -> None:
     queue = GatedCommandQueue(capacity=2)
     dispatched: list[str] = []
@@ -244,7 +241,6 @@ async def test_cancelled_client_item_is_not_dispatched() -> None:
 
     assert dispatched == []
 
-@pytest.mark.asyncio
 async def test_lifespan_shutdown_drains_pending_queue_items() -> None:
     queue = GatedCommandQueue(capacity=3)
     dispatched: list[str] = []
@@ -290,7 +286,6 @@ async def test_lifespan_shutdown_drains_pending_queue_items() -> None:
         assert result.message == "stackchan MCP HTTP server is shutting down"
         assert result.data == {"reason": "server_shutdown"}
 
-@pytest.mark.asyncio
 async def test_auth_rejection_and_successful_bearer_reaches_dispatcher() -> None:
     queue = CommandQueue(capacity=4)
     dispatched: list[str] = []
@@ -334,7 +329,6 @@ async def test_auth_rejection_and_successful_bearer_reaches_dispatcher() -> None
     assert ok.status_code == 200
     assert dispatched == ["get_device_info"]
 
-@pytest.mark.asyncio
 async def test_host_and_origin_rebinding_guards_return_403() -> None:
     app = build_app(
         CommandQueue(capacity=2),
@@ -359,7 +353,6 @@ async def test_host_and_origin_rebinding_guards_return_403() -> None:
     assert bad_origin.status_code == 403
     assert bad_origin.text == ORIGIN_FAILURE_MESSAGE
 
-@pytest.mark.asyncio
 async def test_wildcard_bind_allows_loopback_and_configured_hosts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -390,7 +383,6 @@ async def test_wildcard_bind_allows_loopback_and_configured_hosts(
     assert lan.status_code == 200
     assert origin.status_code == 200
 
-@pytest.mark.asyncio
 async def test_response_correlation_for_two_concurrent_clients() -> None:
     queue = CommandQueue(capacity=4)
 
@@ -444,7 +436,6 @@ async def test_response_correlation_for_two_concurrent_clients() -> None:
     assert body_a["client_request_id"] == "client-a"
     assert body_b["client_request_id"] == "client-b"
 
-@pytest.mark.asyncio
 async def test_bypass_tool_get_status_does_not_enter_dispatcher() -> None:
     assert BYPASS_TOOLS == frozenset(
         {
@@ -482,7 +473,6 @@ async def test_bypass_tool_get_status_does_not_enter_dispatcher() -> None:
     assert status["connected"] is True
     assert queue.depth == 0
 
-@pytest.mark.asyncio
 async def test_switchbot_tools_exposed_and_bypass_device_queue(monkeypatch) -> None:
     """SwitchBot tools are listed over Streamable HTTP and dispatch
     gateway-locally: no queue entry, no ESP32 — even when the device is
@@ -525,7 +515,6 @@ async def test_switchbot_tools_exposed_and_bypass_device_queue(monkeypatch) -> N
     assert "SWITCHBOT_TOKEN" in payload["error"]
     assert queue.depth == 0
 
-@pytest.mark.asyncio
 async def test_dispatcher_returns_stdio_disconnect_payload_as_tool_result() -> None:
     queue = CommandQueue(capacity=2)
     gateway = FakeGateway(connected=False)
@@ -551,7 +540,6 @@ async def test_dispatcher_returns_stdio_disconnect_payload_as_tool_result() -> N
     result_text = payload["result"]["content"][0]["text"]
     assert json.loads(result_text) == DISCONNECTED_DEVICE_PAYLOAD
 
-@pytest.mark.asyncio
 async def test_healthz_is_liveness_only_and_status_requires_auth_for_details() -> None:
     queue = CommandQueue(capacity=2)
     app = build_app(
@@ -582,7 +570,6 @@ async def test_healthz_is_liveness_only_and_status_requires_auth_for_details() -
     assert status_payload["owner_id"] == "owner-test"
     assert status_payload["connected_clients"] == 0
 
-@pytest.mark.asyncio
 async def test_command_queue_raises_queue_full_directly() -> None:
     queue = CommandQueue(capacity=1)
     loop = asyncio.get_running_loop()
@@ -815,7 +802,6 @@ _STATUS_CASES = [
     {"id": "test_control_status_presence_disabled_without_monitor", "path": "/control/status", "status": 200, "body_paths": {"presence": {"enabled": False}}},
 ]
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("case", _STATUS_CASES, ids=[c["id"] for c in _STATUS_CASES])
 async def test_control_status_cases(case, monkeypatch) -> None:
     for env in case.get("del_env", []):
@@ -885,7 +871,6 @@ _SCALAR_FAMILIES = [
     },
 ]
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("family", _SCALAR_FAMILIES, ids=[f["name"] for f in _SCALAR_FAMILIES])
 async def test_control_scalar_sets_and_persists(family) -> None:
     gateway = ControlFakeGateway()
@@ -897,7 +882,6 @@ async def test_control_scalar_sets_and_persists(family) -> None:
     if family["set_call"] is not None:
         assert family["set_call"] in gateway.esp32.calls
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "family",
     [f for f in _SCALAR_FAMILIES if f["bad_bodies"]],
@@ -912,7 +896,6 @@ async def test_control_scalar_rejects_out_of_range(family) -> None:
             assert resp.status_code == 400
             assert resp.json()["ok"] is False
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "family",
     [f for f in _SCALAR_FAMILIES if f["has_503"]],
@@ -993,7 +976,6 @@ _LED_CASES = [
     },
 ]
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("case", _LED_CASES, ids=[c["id"] for c in _LED_CASES])
 async def test_control_led_cases(case, monkeypatch) -> None:
     if case.get("zero_preview_seconds"):
@@ -1030,7 +1012,6 @@ _LISTEN_CASES = [
     },
 ]
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("case", _LISTEN_CASES, ids=[c["id"] for c in _LISTEN_CASES])
 async def test_control_listen_cases(case, monkeypatch) -> None:
     import stackchan_mcp.audio_stream as audio_stream
@@ -1070,7 +1051,6 @@ _PROXIMITY_CASES = [
     },
 ]
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("case", _PROXIMITY_CASES, ids=[c["id"] for c in _PROXIMITY_CASES])
 async def test_control_proximity_cases(case) -> None:
     resp, gateway = await _request_case(case)
@@ -1121,7 +1101,6 @@ _POLICY_SET_CASES = [
     },
 ]
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("case", _POLICY_SET_CASES, ids=[c["id"] for c in _POLICY_SET_CASES])
 async def test_control_policy_set_cases(case, monkeypatch) -> None:
     for env in case["del_env"]:
@@ -1147,7 +1126,6 @@ _NON_BOOL_CASES = [
     {"id": "test_control_mute_requires_boolean", "path": "/control/mute", "json": {"muted": "yes"}},
 ]
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("case", _NON_BOOL_CASES, ids=[c["id"] for c in _NON_BOOL_CASES])
 async def test_control_rejects_non_bool(case) -> None:
     resp, _ = await _request_case(case)
@@ -1170,7 +1148,6 @@ _AVATAR_CASES = [
     },
 ]
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("case", _AVATAR_CASES, ids=[c["id"] for c in _AVATAR_CASES])
 async def test_control_avatar_cases(case) -> None:
     resp, gateway = await _request_case(case)
@@ -1195,7 +1172,6 @@ _SAY_CASES = [
     },
 ]
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("case", _SAY_CASES, ids=[c["id"] for c in _SAY_CASES])
 async def test_control_say_cases(case, monkeypatch) -> None:
     if case.get("patch_orchestrator"):
@@ -1230,7 +1206,6 @@ _AUDIO_LEVEL_CASES = [
     },
 ]
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("case", _AUDIO_LEVEL_CASES, ids=[c["id"] for c in _AUDIO_LEVEL_CASES])
 async def test_control_audio_level_cases(case, monkeypatch) -> None:
     import stackchan_mcp.audio_stream as audio_stream
@@ -1262,7 +1237,6 @@ _TOKEN_GET_CASES = [
     },
 ]
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("case", _TOKEN_GET_CASES, ids=[c["id"] for c in _TOKEN_GET_CASES])
 async def test_control_get_requires_token(case) -> None:
     gateway = ControlFakeGateway(**case.get("gateway_kwargs", {}))
@@ -1286,7 +1260,6 @@ async def test_control_mic_gain_reflected_in_status() -> None:
         status = await client.get("/control/status")
     assert status.json()["mic_gain"] == 12
 
-@pytest.mark.asyncio
 async def test_control_conversation_empty() -> None:
     from stackchan_mcp import control
 
@@ -1298,7 +1271,6 @@ async def test_control_conversation_empty() -> None:
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "turns": []}
 
-@pytest.mark.asyncio
 async def test_control_conversation_returns_recorded_turns() -> None:
     from stackchan_mcp import control
 
@@ -1316,10 +1288,8 @@ async def test_control_conversation_returns_recorded_turns() -> None:
     assert body["turns"][1]["timings_ms"] == {"total": 1500}
     control._CONVERSATION.clear()
 
-@pytest.mark.asyncio
 # ---- mode presets -----------------------------------------------------
 
-@pytest.mark.asyncio
 async def test_control_presets_save_and_list() -> None:
     gateway = ControlFakeGateway(heartbeat=FakeHeartbeat(gestures=True))
     app = _build_control_app(gateway)
@@ -1359,7 +1329,6 @@ _PRESET_ERROR_CASES = [
     },
 ]
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("case", _PRESET_ERROR_CASES, ids=[c["id"] for c in _PRESET_ERROR_CASES])
 async def test_control_preset_error_cases(case) -> None:
     resp, gateway = await _request_case(case)
@@ -1377,7 +1346,6 @@ async def test_control_presets_save_conflict_without_overwrite() -> None:
     assert dup.status_code == 409
     assert forced.status_code == 200
 
-@pytest.mark.asyncio
 async def test_control_presets_apply_resends_and_reports() -> None:
     from stackchan_mcp import control
 
@@ -1396,7 +1364,6 @@ async def test_control_presets_apply_resends_and_reports() -> None:
     assert "self.touch.set_proximity_config" in tools
     assert control.load_state()["volume"] == 80
 
-@pytest.mark.asyncio
 async def test_control_presets_delete() -> None:
     gateway = ControlFakeGateway()
     app = _build_control_app(gateway)
@@ -1450,7 +1417,6 @@ _I2C_DISPATCH_CASES = [
     {"id": "test_control_i2c_rejects_unknown_op", "path": "/control/i2c", "json": {"op": "nope"}, "status": 400, "calls_empty": True},
 ]
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("case", _I2C_DISPATCH_CASES, ids=[c["id"] for c in _I2C_DISPATCH_CASES])
 async def test_control_i2c_dispatch_cases(case) -> None:
     resp, gateway = await _request_case(case)
@@ -1472,7 +1438,6 @@ async def test_control_i2c_surfaces_device_bytes() -> None:
     assert resp.status_code == 200
     assert resp.json()["bytes"] == [0xD3]  # WHO_AM_I reads back verbatim
 
-@pytest.mark.asyncio
 async def test_control_i2c_device_error_maps_502() -> None:
     gateway = ControlFakeGateway()
 
@@ -1489,7 +1454,6 @@ async def test_control_i2c_device_error_maps_502() -> None:
     assert resp.status_code == 502
     assert resp.json()["error"] == "ESP_ERR_TIMEOUT"
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("addr", [0x07, 0x78, "0x5A", True, None])
 async def test_control_i2c_rejects_out_of_range_addr(addr) -> None:
     gateway = ControlFakeGateway()
@@ -1501,7 +1465,6 @@ async def test_control_i2c_rejects_out_of_range_addr(addr) -> None:
     assert resp.status_code == 400
     assert gateway.esp32.calls == []
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("n", [0, 257, True, "2", None])
 async def test_control_i2c_rejects_bad_n_bytes(n) -> None:
     gateway = ControlFakeGateway()
@@ -1512,7 +1475,6 @@ async def test_control_i2c_rejects_bad_n_bytes(n) -> None:
         )
     assert resp.status_code == 400
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("data", [[], [256], [-1], [True], "x", [1, "2"]])
 async def test_control_i2c_rejects_bad_bytes(data) -> None:
     gateway = ControlFakeGateway()
@@ -1523,7 +1485,6 @@ async def test_control_i2c_rejects_bad_bytes(data) -> None:
         )
     assert resp.status_code == 400
 
-@pytest.mark.asyncio
 def _sensor_call_tool(reg_map, *, recorded=None):
     """Programmable esp32.call_tool: serve register bytes for write_read,
     ack writes, optionally recording (esp32_name, args)."""
@@ -1542,7 +1503,6 @@ def _sensor_call_tool(reg_map, *, recorded=None):
 
     return _fake
 
-@pytest.mark.asyncio
 async def test_control_sensors_reads_both() -> None:
     gateway = ControlFakeGateway()
     reg_map = {
@@ -1565,7 +1525,6 @@ async def test_control_sensors_reads_both() -> None:
     assert body["tmos"]["ambient_c"] == 30.0
     assert body["gesture"]["gesture"] == "up"
 
-@pytest.mark.asyncio
 async def test_control_sensors_partial_error_stays_200() -> None:
     # TMOS reads fine; the gesture unit NACKs -> nested error, top-level ok.
     gateway = ControlFakeGateway()
@@ -1598,7 +1557,6 @@ async def test_control_sensors_partial_error_stays_200() -> None:
     assert body["tmos"]["present"] is False
     assert "error" in body["gesture"]
 
-@pytest.mark.asyncio
 async def test_control_sensors_init_writes_gesture_array() -> None:
     gateway = ControlFakeGateway()
     recorded: list[tuple[str, dict]] = []
@@ -1637,7 +1595,6 @@ _CONTROL_503_CASES = [
     {"id": "test_control_presence_config_503_when_no_monitor", "path": "/control/presence/config", "json": {"absent_after_s": 60}},
 ]
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("case", _CONTROL_503_CASES, ids=[c["id"] for c in _CONTROL_503_CASES])
 async def test_control_route_503_when_unavailable(case) -> None:
     resp, _ = await _request_case(case, method=case.get("method", "post"))
@@ -1666,7 +1623,6 @@ _PRESENCE_GET_CASES = [
     {"id": "test_control_presence_report_disabled_when_no_monitor", "path": "/control/presence/report", "status": 200, "body_full": {"ok": True, "enabled": False}},
 ]
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("case", _PRESENCE_GET_CASES, ids=[c["id"] for c in _PRESENCE_GET_CASES])
 async def test_control_presence_get_cases(case) -> None:
     resp, gateway = await _request_case(case, method="get")
@@ -1675,7 +1631,6 @@ async def test_control_presence_get_cases(case) -> None:
         presence = gateway._presence
         assert isinstance(presence, FakePresenceMonitor) and presence.report_calls == case["report_calls"]
 
-@pytest.mark.asyncio
 async def test_control_presence_report_days_query() -> None:
     monitor = FakePresenceMonitor()
     gateway = ControlFakeGateway(presence=monitor)
@@ -1686,7 +1641,6 @@ async def test_control_presence_report_days_query() -> None:
         await client.get("/control/presence/report?days=abc")  # fallback to 7
     assert monitor.report_calls == [14, 28, 7]
 
-@pytest.mark.asyncio
 async def test_control_presence_config_updates() -> None:
     monitor = FakePresenceMonitor()
     gateway = ControlFakeGateway(presence=monitor)
@@ -1715,7 +1669,6 @@ _PRESENCE_CONFIG_400_CASES = [
     },
 ]
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("case", _PRESENCE_CONFIG_400_CASES, ids=[c["id"] for c in _PRESENCE_CONFIG_400_CASES])
 async def test_control_presence_config_invalid(case) -> None:
     monitor = FakePresenceMonitor(config_result=case.get("monitor_result"))
