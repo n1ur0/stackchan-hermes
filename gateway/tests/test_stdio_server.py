@@ -871,8 +871,19 @@ async def test_list_tools_includes_set_status_text():
     assert tool.inputSchema["required"] == ["text"]
 
 
-async def test_web_search_shows_searching_during_voice_turn(monkeypatch):
-    """During a voice turn, web_search flips the device status to Searching...."""
+@pytest.mark.parametrize(
+    ("voice_turn_active", "expected_status"),
+    [
+        (True, [stdio_server.control.STATUS_SEARCHING]),
+        (False, []),
+    ],
+    ids=["during-voice-turn", "outside-voice-turn"],
+)
+async def test_web_search_status_bracketed_by_voice_turn(
+    monkeypatch, voice_turn_active, expected_status
+):
+    """During a voice turn, web_search flips the device status to
+    Searching...; outside one (e.g. Claude Desktop), no status text fires."""
     status_calls = []
 
     async def fake_search(query, max_results=None):
@@ -887,33 +898,11 @@ async def test_web_search_shows_searching_during_voice_turn(monkeypatch):
     )
 
     class FakeGateway:
-        voice_turn_active = True
+        pass
+
+    setattr(FakeGateway, "voice_turn_active", voice_turn_active)
 
     await stdio_server._dispatch_mcp_tool(
         "web_search", {"query": "weather"}, FakeGateway()
     )
-    assert status_calls == [stdio_server.control.STATUS_SEARCHING]
-
-
-async def test_web_search_no_status_outside_voice_turn(monkeypatch):
-    """Outside a voice turn (e.g. Claude Desktop), no status text fires."""
-    status_calls = []
-
-    async def fake_search(query, max_results=None):
-        return {"results": []}
-
-    async def fake_status(gateway, text):
-        status_calls.append(text)
-
-    monkeypatch.setattr(stdio_server.web_search, "search", fake_search)
-    monkeypatch.setattr(
-        stdio_server.control, "set_device_status_text", fake_status
-    )
-
-    class FakeGateway:
-        voice_turn_active = False
-
-    await stdio_server._dispatch_mcp_tool(
-        "web_search", {"query": "weather"}, FakeGateway()
-    )
-    assert status_calls == []
+    assert status_calls == expected_status

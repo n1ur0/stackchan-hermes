@@ -339,35 +339,26 @@ async def test_stream_rejects_disconnected_device(fake_opuslib):
     assert esp32.tts_states == []
 
 
-async def test_stream_blocks_protocol_v2(fake_opuslib):
-    """v2 binary protocol is rejected, no encode happens."""
+@pytest.mark.parametrize(
+    ("protocol_version", "error_match"),
+    [(2, "protocol v1"), (3, r"v3")],
+    ids=["protocol-v2", "protocol-v3"],
+)
+async def test_stream_blocks_non_v1_protocol(fake_opuslib, protocol_version, error_match):
+    """v2/v3 binary protocol is rejected, no encode happens."""
     from types import SimpleNamespace
 
     esp32 = _FakeESP32(connected=True)
-    esp32.connection = SimpleNamespace(protocol_version=2)
+    esp32.connection = SimpleNamespace(protocol_version=protocol_version)
     gateway = _FakeGateway(esp32)
 
-    with pytest.raises(RuntimeError, match="protocol v1"):
+    with pytest.raises(RuntimeError, match=error_match):
         await send_pcm_stream(
             gateway, _aiter([b"\x01\x00" * SAMPLES_PER_FRAME])
         )
 
     assert esp32.tts_states == []
     assert esp32.frames == []
-
-
-async def test_stream_blocks_protocol_v3(fake_opuslib):
-    """v3 binary protocol is rejected, same path as v2."""
-    from types import SimpleNamespace
-
-    esp32 = _FakeESP32(connected=True)
-    esp32.connection = SimpleNamespace(protocol_version=3)
-    gateway = _FakeGateway(esp32)
-
-    with pytest.raises(RuntimeError, match=r"v3"):
-        await send_pcm_stream(
-            gateway, _aiter([b"\x01\x00" * SAMPLES_PER_FRAME])
-        )
 
 
 async def test_stream_reports_missing_opuslib(monkeypatch):

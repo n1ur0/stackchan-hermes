@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -381,99 +382,120 @@ async def test_ask_local_without_model_raises(monkeypatch):
 # --- generate_reply (routing + fallback in the voice bridge) ------------------
 
 
-async def test_generate_reply_disabled_uses_hermes(monkeypatch):
-    """Without STACKCHAN_LOCAL_LLM_MODEL the local path is never touched —
-    identical to the pre-routing behaviour."""
-    monkeypatch.delenv("STACKCHAN_LOCAL_LLM_MODEL", raising=False)
-    calls: list[str] = []
+@dataclass
+class _RouteCase:
+    """One generate_reply routing/fallback scenario."""
 
+    id: str
+    model: str | None          # None => local disabled
+    text: str
+    # How to stub each half. True => succeeds, "raise:MSG" => raises,
+    # None => not registered (a pointer either asserted intact or unused).
+    hermes: object = True
+    local: object = True
+    expected: tuple[str, str] | None = None   # (reply, route)
+    raises: str | None = None                  # RuntimeError match
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        _RouteCase(
+            id="disabled-uses-hermes",
+            model=None,
+            text="good morning",
+            local=None,  # local path must not be called when disabled
+            expected=("hermes reply", "hermes"),
+        ),
+        _RouteCase(
+            id="short-turn-routes-local",
+            model="test-model:q4",
+            text="good morning",
+            hermes=None,  # Hermes must not be called on the local route
+            expected=("local reply", "local"),
+        ),
+        _RouteCase(
+            id="long-turn-goes-hermes",
+            model="test-model:q4",
+            text="check the weather tomorrow",
+            local=None,  # local path must not be called for Hermes turns
+            expected=("hermes reply", "hermes"),
+        ),
+        _RouteCase(
+            id="local-failure-falls-back",
+            model="test-model:q4",
+            text="good morning",
+            local="raise:connection refused",
+            expected=("hermes reply", "hermes"),
+        ),
+        _RouteCase(
+            id="hermes-failure-still-raises",
+            model=None,
+            text="good morning",
+            hermes="raise:Hermes API returned status=500",
+            raises="status=500",
+        ),
+    ],
+    ids=lambda c: c.id,
+)
+async def test_generate_reply_routing_and_fallback(
+    monkeypatch, case: _RouteCase
+):
+    """The bridge routes short turns to the local LLM and Hermes otherwise,
+    falling back to Hermes when the local path fails but never swallowing a
+    Hermes failure."""
+    if case.model is None:
+        monkeypatch.delenv("STACKCHAN_LOCAL_LLM_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("STACKCHAN_LOCAL_LLM_MODEL", case.model)
+
+    local_called: list[tuple[str, str]] = []
+    hermes_called: list[tuple[str, str | None]] = []
+
+    # Register both halves unconditionally; each stub honours its case spec:
+    #  - None        -> must NOT be called (assert)
+    #  - "raise:.."  -> raise RuntimeError
+    #  - otherwise   -> record the call and return the canned reply.
     async def fake_hermes(
         text: str, *, session_id: str | None = None, on_step: Any | None = None
-    ) -> str:
-        calls.append(text)
+    ):
+        if case.hermes is None:
+            raise AssertionError("Hermes must not be called on this route")
+        hermes_called.append((text, session_id))
+        if isinstance(case.hermes, str):
+            raise RuntimeError(case.hermes[6:])
         return "hermes reply"
-
-    async def fail_local(text: str, *, system_prompt: str) -> str:
-        raise AssertionError("local path must not be called when disabled")
-
-    monkeypatch.setattr(hermes_bridge, "ask_hermes_stream", fake_hermes)
-    monkeypatch.setattr(local_llm, "ask_local", fail_local)
-
-    reply, route = await hermes_bridge.generate_reply("good morning")
-    assert (reply, route) == ("hermes reply", "hermes")
-    assert calls == ["good morning"]
-
-
-async def test_generate_reply_routes_short_turn_local(monkeypatch):
-    monkeypatch.setenv("STACKCHAN_LOCAL_LLM_MODEL", "test-model:q4")
-
-    async def fail_hermes(
-        text: str, *, session_id: str | None = None, on_step: Any | None = None
-    ) -> str:
-        raise AssertionError("Hermes must not be called on the local route")
 
     async def fake_local(text: str, *, system_prompt: str) -> str:
-        assert text == "good morning"
-        assert system_prompt   # voice constraints are passed through
+        if case.local is None:
+            raise AssertionError("local path must not be called on this route")
+        local_called.append((text, system_prompt))
+        if isinstance(case.local, str):
+            raise RuntimeError(case.local[6:])
+        assert text == case.text
+        assert system_prompt  # voice constraints are passed through
         return "local reply"
 
-    monkeypatch.setattr(hermes_bridge, "ask_hermes_stream", fail_hermes)
+    monkeypatch.setattr(hermes_bridge, "ask_hermes_stream", fake_hermes)
     monkeypatch.setattr(local_llm, "ask_local", fake_local)
 
-    reply, route = await hermes_bridge.generate_reply("good morning")
-    assert (reply, route) == ("local reply", "local")
+    if case.raises:
+        with pytest.raises(RuntimeError, match=case.raises):
+            await hermes_bridge.generate_reply(case.text)
+        return
 
-
-async def test_generate_reply_long_turn_goes_hermes(monkeypatch):
-    """Routing enabled, but a deliberation-grade turn still goes to Hermes."""
-    monkeypatch.setenv("STACKCHAN_LOCAL_LLM_MODEL", "test-model:q4")
-
-    async def fake_hermes(
-        text: str, *, session_id: str | None = None, on_step: Any | None = None
-    ) -> str:
-        return "hermes reply"
-
-    async def fail_local(text: str, *, system_prompt: str) -> str:
-        raise AssertionError("local path must not be called for Hermes turns")
-
-    monkeypatch.setattr(hermes_bridge, "ask_hermes_stream", fake_hermes)
-    monkeypatch.setattr(local_llm, "ask_local", fail_local)
-
-    reply, route = await hermes_bridge.generate_reply("check the weather tomorrow")
-    assert (reply, route) == ("hermes reply", "hermes")
-
-
-async def test_generate_reply_local_failure_falls_back(monkeypatch):
-    """Ollama down / timeout / bad reply → the turn survives via Hermes."""
-    monkeypatch.setenv("STACKCHAN_LOCAL_LLM_MODEL", "test-model:q4")
-
-    async def fake_hermes(
-        text: str, *, session_id: str | None = None, on_step: Any | None = None
-    ) -> str:
-        return "hermes reply"
-
-    async def broken_local(text: str, *, system_prompt: str) -> str:
-        raise RuntimeError("connection refused")
-
-    monkeypatch.setattr(hermes_bridge, "ask_hermes_stream", fake_hermes)
-    monkeypatch.setattr(local_llm, "ask_local", broken_local)
-
-    reply, route = await hermes_bridge.generate_reply("good morning")
-    assert (reply, route) == ("hermes reply", "hermes")
-
-
-async def test_generate_reply_hermes_failure_still_raises(monkeypatch):
-    """A Hermes failure propagates as before — fallback only covers local."""
-    monkeypatch.delenv("STACKCHAN_LOCAL_LLM_MODEL", raising=False)
-
-    async def broken_hermes(
-        text: str, *, session_id: str | None = None, on_step: Any | None = None
-    ) -> str:
-        raise RuntimeError("Hermes API returned status=500")
-
-    monkeypatch.setattr(hermes_bridge, "ask_hermes_stream", broken_hermes)
-    with pytest.raises(RuntimeError, match="status=500"):
-        await hermes_bridge.generate_reply("good morning")
+    reply, route = await hermes_bridge.generate_reply(case.text)
+    assert (reply, route) == case.expected
+    # local-only scenarios must have hit the local stub; hermes-only the hermes stub.
+    if case.id == "short-turn-routes-local":
+        assert [t for t, _ in local_called] == [case.text]
+    elif case.id == "local-failure-falls-back":
+        # Local *is* consulted (and fails) before Hermes is tried.
+        assert [t for t, _ in local_called] == [case.text]
+    else:
+        assert local_called == []
+    if case.id in ("disabled-uses-hermes", "long-turn-goes-hermes", "local-failure-falls-back"):
+        assert [t for t, _ in hermes_called] == [case.text]
 
 
 # --- helpers ------------------------------------------------------------------

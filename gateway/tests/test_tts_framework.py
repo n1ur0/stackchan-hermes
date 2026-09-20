@@ -89,28 +89,19 @@ def test_default_voice_constant():
     assert DEFAULT_VOICE == "voicevox"
 
 
-async def test_synthesize_and_send_rejects_missing_text():
-    """No text -> ValueError before any engine lookup."""
+@pytest.mark.parametrize(
+    "opts",
+    [{}, {"text": "   "}, {"text": 42}],
+    ids=["missing-text", "whitespace-text", "non-string-text"],
+)
+async def test_synthesize_and_send_rejects_invalid_text(opts):
+    """Missing / whitespace-only / non-string text all -> ValueError."""
     reg = EngineRegistry()
     with pytest.raises(ValueError, match="text"):
-        await synthesize_and_send({}, registry=reg)
+        await synthesize_and_send(opts, registry=reg)
 
 
-async def test_synthesize_and_send_rejects_empty_text():
-    """Whitespace-only text is rejected the same as empty."""
-    reg = EngineRegistry()
-    with pytest.raises(ValueError, match="text"):
-        await synthesize_and_send({"text": "   "}, registry=reg)
-
-
-async def test_synthesize_and_send_rejects_non_string_text():
-    """Non-string text -> ValueError (defensive against bad MCP clients)."""
-    reg = EngineRegistry()
-    with pytest.raises(ValueError, match="text"):
-        await synthesize_and_send({"text": 42}, registry=reg)
-
-
-async def test_synthesize_and_send_unregistered_voice_raises():
+async def test_synthesize_and_send_rejects_unregistered_voice():
     """Unregistered voice -> NotImplementedError, listing what's available."""
     reg = EngineRegistry()
     with pytest.raises(NotImplementedError) as exc_info:

@@ -91,39 +91,18 @@ def test_default_engine_constant():
     assert DEFAULT_ENGINE == "faster-whisper"
 
 
-async def test_listen_rejects_non_int_duration():
-    """Non-integer duration_ms -> ValueError before any engine lookup."""
+@pytest.mark.parametrize(
+    "duration",
+    ["5000", True, 50, 60000],
+    ids=["non-int", "boolean", "below-minimum", "above-maximum"],
+)
+async def test_listen_rejects_invalid_duration(duration):
+    """Non-int, bool, and out-of-range duration_ms all fail before any
+    engine lookup."""
     reg = EngineRegistry()
     with pytest.raises(ValueError, match="duration_ms"):
         await listen_and_transcribe(
-            {"duration_ms": "5000"}, registry=reg
-        )
-
-
-async def test_listen_rejects_boolean_duration():
-    """``bool`` is a subclass of int — guard against it explicitly."""
-    reg = EngineRegistry()
-    with pytest.raises(ValueError, match="duration_ms"):
-        await listen_and_transcribe(
-            {"duration_ms": True}, registry=reg
-        )
-
-
-async def test_listen_rejects_duration_below_minimum():
-    """duration_ms < 100 -> ValueError."""
-    reg = EngineRegistry()
-    with pytest.raises(ValueError, match="duration_ms"):
-        await listen_and_transcribe(
-            {"duration_ms": 50}, registry=reg
-        )
-
-
-async def test_listen_rejects_duration_above_maximum():
-    """duration_ms > 30000 -> ValueError."""
-    reg = EngineRegistry()
-    with pytest.raises(ValueError, match="duration_ms"):
-        await listen_and_transcribe(
-            {"duration_ms": 60000}, registry=reg
+            {"duration_ms": duration}, registry=reg
         )
 
 

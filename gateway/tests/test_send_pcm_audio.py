@@ -198,30 +198,22 @@ async def test_send_pcm_audio_rejects_disconnected_device(fake_encode):
 # ---------------------------------------------------------------------------
 
 
-async def test_send_pcm_audio_blocks_protocol_v2(fake_encode):
-    """Devices on v2 binary protocol get clear errors, not silent failure."""
+@pytest.mark.parametrize(
+    ("protocol_version", "error_match"),
+    [(2, "protocol v1"), (3, r"v3")],
+    ids=["protocol-v2", "protocol-v3"],
+)
+async def test_send_pcm_audio_blocks_non_v1_protocol(
+    fake_encode, protocol_version, error_match
+):
+    """Devices on v2/v3 binary protocol get clear errors, not silent failure."""
     from types import SimpleNamespace
 
     esp32 = _FakeESP32(connected=True)
-    esp32.connection = SimpleNamespace(protocol_version=2)
+    esp32.connection = SimpleNamespace(protocol_version=protocol_version)
     gateway = _FakeGateway(esp32)
 
-    with pytest.raises(RuntimeError, match="protocol v1"):
-        await send_pcm_audio(gateway, b"\x01\x00" * 960)
-
-    assert esp32.tts_states == []
-    assert esp32.frames == []
-
-
-async def test_send_pcm_audio_blocks_protocol_v3(fake_encode):
-    """v3 is blocked the same way as v2."""
-    from types import SimpleNamespace
-
-    esp32 = _FakeESP32(connected=True)
-    esp32.connection = SimpleNamespace(protocol_version=3)
-    gateway = _FakeGateway(esp32)
-
-    with pytest.raises(RuntimeError, match=r"v3"):
+    with pytest.raises(RuntimeError, match=error_match):
         await send_pcm_audio(gateway, b"\x01\x00" * 960)
 
     assert esp32.tts_states == []

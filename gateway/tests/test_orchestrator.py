@@ -175,8 +175,15 @@ async def test_pipeline_raises_when_device_disconnected(fake_encode):
     assert engine.calls == []
 
 
-async def test_pipeline_blocks_protocol_v2(fake_encode):
-    """Devices that negotiated WebSocket protocol v2 are blocked.
+@pytest.mark.parametrize(
+    ("protocol_version", "error_match"),
+    [(2, "protocol v1"), (3, r"v3")],
+    ids=["protocol-v2", "protocol-v3"],
+)
+async def test_pipeline_blocks_non_v1_protocol(
+    fake_encode, protocol_version, error_match
+):
+    """Devices on WebSocket protocol v2/v3 are blocked.
 
     The gateway emits raw Opus binary frames matching firmware v1; v2/v3
     expect a BinaryProtocol header wrapped around each binary message.
@@ -190,14 +197,16 @@ async def test_pipeline_blocks_protocol_v2(fake_encode):
     pcm = b"\x01\x00" * 1440
     engine = _PCMEngine(pcm)
     esp32 = _FakeESP32(connected=True)
-    esp32.connection = SimpleNamespace(protocol_version=2)
+    esp32.connection = SimpleNamespace(protocol_version=protocol_version)
     gateway = _FakeGateway(esp32)
 
     reg = EngineRegistry()
     reg.register(engine)
 
-    with pytest.raises(RuntimeError, match="protocol v1"):
-        await synthesize_and_send({"text": "hello"}, gateway=gateway, registry=reg)
+    with pytest.raises(RuntimeError, match=error_match):
+        await synthesize_and_send(
+            {"text": "hello"}, gateway=gateway, registry=reg
+        )
 
     # Nothing should reach the device — neither TTS state notifications
     # nor audio frames — and the engine must not even be invoked, since
@@ -255,26 +264,6 @@ async def test_pipeline_serialises_concurrent_say_calls(fake_encode):
     # The second utterance cannot begin until the first one finishes
     # its stop notification.
     assert start_indices[0] < stop_indices[0] < start_indices[1] < stop_indices[1]
-
-
-async def test_pipeline_blocks_protocol_v3(fake_encode):
-    """Devices on protocol v3 are blocked the same way as v2."""
-    from types import SimpleNamespace
-
-    pcm = b"\x01\x00" * 1440
-    engine = _PCMEngine(pcm)
-    esp32 = _FakeESP32(connected=True)
-    esp32.connection = SimpleNamespace(protocol_version=3)
-    gateway = _FakeGateway(esp32)
-
-    reg = EngineRegistry()
-    reg.register(engine)
-
-    with pytest.raises(RuntimeError, match=r"v3"):
-        await synthesize_and_send({"text": "hi"}, gateway=gateway, registry=reg)
-
-    assert esp32.tts_states == []
-    assert esp32.frames == []
 
 
 async def test_pipeline_raises_when_engine_returns_no_pcm(fake_encode):
