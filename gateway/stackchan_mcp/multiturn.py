@@ -52,7 +52,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import local_llm
+from . import _utils, local_llm
 
 #: Reply suffixes that invite a follow-up answer.
 _CONTINUE_SUFFIXES = ("?",)
@@ -70,10 +70,7 @@ DEFAULT_SESSION_WINDOW_S = 180
 
 def _env_positive_int(name: str, default: int) -> int:
     """Parse a positive int env var, falling back to ``default``."""
-    try:
-        value = int(os.getenv(name, ""))
-    except (TypeError, ValueError):
-        return default
+    value = _utils.env_int(name, default, component="multiturn")
     return value if value > 0 else default
 
 
@@ -86,12 +83,7 @@ def is_enabled() -> bool:
     toggle's initial default (see ``control._default_multiturn``). Kept for
     that default and for tests.
     """
-    return os.getenv("STACKCHAN_MULTITURN", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    return _utils.env_bool("STACKCHAN_MULTITURN")
 
 
 def max_turns() -> int:

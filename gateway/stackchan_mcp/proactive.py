@@ -74,12 +74,11 @@ import datetime as _dt
 import json
 import logging
 import os
-import tempfile
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import activity_log
+from . import _utils, activity_log
 from .audio_stream import is_recording
 from .heartbeat import is_quiet, parse_quiet_hours
 from .presence import PresenceState
@@ -177,18 +176,6 @@ _ALL_TRANSITIONS: tuple[_Transition, ...] = (
 )
 
 
-def _env_number(name: str, default: float) -> float:
-    """A numeric env var, warning and falling back on garbage."""
-    raw = os.getenv(name, "")
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning("proactive: invalid %s=%r; using %s", name, raw, default)
-        return default
-
-
 def _parse_transitions(raw: str) -> set[str]:
     """Keys from a CSV, intersected with the known transitions."""
     requested = {p.strip().lower() for p in raw.split(",") if p.strip()}
@@ -241,22 +228,34 @@ class ProactiveSpeaker:
         A malformed quiet window raises (same fail-loudly policy as the
         heartbeat) — a typo must not silently change when the robot talks.
         """
-        if os.getenv("STACKCHAN_PROACTIVE", "").strip().lower() not in (
-            "1",
-            "true",
-            "yes",
-            "on",
-        ):
+        if not _utils.env_bool("STACKCHAN_PROACTIVE"):
             return None
         config = ProactiveConfig(
             cooldown_min=max(
-                0.0, _env_number("STACKCHAN_PROACTIVE_COOLDOWN_MIN", DEFAULT_COOLDOWN_MIN)
+                0.0,
+                _utils.env_float(
+                    "STACKCHAN_PROACTIVE_COOLDOWN_MIN",
+                    DEFAULT_COOLDOWN_MIN,
+                    component="proactive",
+                ),
             ),
             max_per_day=max(
-                0, int(_env_number("STACKCHAN_PROACTIVE_MAX_PER_DAY", DEFAULT_MAX_PER_DAY))
+                0,
+                int(
+                    _utils.env_float(
+                        "STACKCHAN_PROACTIVE_MAX_PER_DAY",
+                        DEFAULT_MAX_PER_DAY,
+                        component="proactive",
+                    )
+                ),
             ),
             refire_min=max(
-                0.0, _env_number("STACKCHAN_PROACTIVE_REFIRE_MIN", DEFAULT_REFIRE_MIN)
+                0.0,
+                _utils.env_float(
+                    "STACKCHAN_PROACTIVE_REFIRE_MIN",
+                    DEFAULT_REFIRE_MIN,
+                    component="proactive",
+                ),
             ),
             enabled_transitions=_parse_transitions(
                 os.getenv("STACKCHAN_PROACTIVE_TRANSITIONS", DEFAULT_TRANSITIONS)
@@ -271,7 +270,12 @@ class ProactiveSpeaker:
                 "STACKCHAN_PROACTIVE_NIGHT_PRESET", DEFAULT_NIGHT_PRESET
             ).strip(),
             mode_switch_delay_s=max(
-                0.0, _env_number("STACKCHAN_PROACTIVE_MODE_DELAY_S", DEFAULT_MODE_DELAY_S)
+                0.0,
+                _utils.env_float(
+                    "STACKCHAN_PROACTIVE_MODE_DELAY_S",
+                    DEFAULT_MODE_DELAY_S,
+                    component="proactive",
+                ),
             ),
             state_path=Path(
                 os.getenv("STACKCHAN_PROACTIVE_STATE", "") or DEFAULT_STATE_PATH
@@ -525,15 +529,7 @@ class ProactiveSpeaker:
         # truncate the day's speak-count into garbage.
         path = self._config.state_path
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as fp:
-                    json.dump(self._state, fp, ensure_ascii=False)
-                os.replace(tmp, path)
-            finally:
-                if os.path.exists(tmp):
-                    os.unlink(tmp)
+            _utils.atomic_write_json(path, self._state)
         except OSError as exc:
             logger.warning("proactive: cannot write state file %s (%s)", path, exc)
 

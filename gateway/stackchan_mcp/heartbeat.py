@@ -69,12 +69,11 @@ import json
 import logging
 import os
 import random
-import tempfile
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import activity_log, multiturn, notes, weather
+from . import _utils, activity_log, multiturn, notes, weather
 from .audio_stream import is_recording
 
 if TYPE_CHECKING:
@@ -171,18 +170,6 @@ def _memo_snippet(content: str) -> str:
     return ""
 
 
-def _env_number(name: str, default: float) -> float:
-    """A numeric env var, warning and falling back on garbage."""
-    raw = os.getenv(name, "")
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning("heartbeat: invalid %s=%r; using %s", name, raw, default)
-        return default
-
-
 def speak_config_from_env() -> SpeakConfig | None:
     """Stage-2 settings from the environment, or None when off.
 
@@ -192,34 +179,35 @@ def speak_config_from_env() -> SpeakConfig | None:
     STACKCHAN_HEARTBEAT_QUIET) — a typo must not silently change when
     the robot is allowed to talk.
     """
-    if os.getenv("STACKCHAN_HEARTBEAT_SPEAK", "").strip().lower() not in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    ):
+    if not _utils.env_bool("STACKCHAN_HEARTBEAT_SPEAK"):
         return None
     return SpeakConfig(
         cooldown_min=max(
             0.0,
-            _env_number(
+            _utils.env_float(
                 "STACKCHAN_HEARTBEAT_SPEAK_COOLDOWN_MIN",
                 DEFAULT_SPEAK_COOLDOWN_MIN,
+                component="heartbeat",
             ),
         ),
         max_per_day=max(
             0,
             int(
-                _env_number(
+                _utils.env_float(
                     "STACKCHAN_HEARTBEAT_SPEAK_MAX_PER_DAY",
                     DEFAULT_SPEAK_MAX_PER_DAY,
+                    component="heartbeat",
                 )
             ),
         ),
         weather_area=os.getenv("STACKCHAN_WEATHER_AREA", "").strip(),
         weather_city=os.getenv("STACKCHAN_WEATHER_CITY", "").strip(),
         pop_threshold=int(
-            _env_number("STACKCHAN_WEATHER_POP_THRESHOLD", DEFAULT_POP_THRESHOLD)
+            _utils.env_float(
+                "STACKCHAN_WEATHER_POP_THRESHOLD",
+                DEFAULT_POP_THRESHOLD,
+                component="heartbeat",
+            )
         ),
         weather_window=parse_quiet_hours(
             os.getenv("STACKCHAN_WEATHER_WINDOW", DEFAULT_WEATHER_WINDOW)
@@ -283,12 +271,7 @@ class HeartbeatRunner:
             os.getenv("STACKCHAN_HEARTBEAT_QUIET", DEFAULT_QUIET)
         )
 
-        gestures = os.getenv("STACKCHAN_HEARTBEAT_GESTURES", "1").strip().lower() not in (
-            "0",
-            "false",
-            "no",
-            "off",
-        )
+        gestures = _utils.env_bool("STACKCHAN_HEARTBEAT_GESTURES", default=True)
 
         return cls(
             gateway,
@@ -600,15 +583,7 @@ class HeartbeatRunner:
         assert self._speak is not None
         path = self._speak.state_path
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as fp:
-                    json.dump(self._state, fp, ensure_ascii=False)
-                os.replace(tmp, path)
-            finally:
-                if os.path.exists(tmp):
-                    os.unlink(tmp)
+            _utils.atomic_write_json(path, self._state)
         except OSError as exc:
             logger.warning("heartbeat: cannot write state file %s (%s)", path, exc)
 

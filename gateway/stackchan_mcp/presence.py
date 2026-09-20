@@ -62,7 +62,6 @@ import datetime as _dt
 import json
 import logging
 import os
-import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from enum import Enum
@@ -267,15 +266,7 @@ def save_config(config: dict[str, Any]) -> None:
         "sleep_window": _valid_window(config.get("sleep_window")) or DEFAULT_SLEEP_WINDOW,
     }
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fp:
-                json.dump(payload, fp, ensure_ascii=False)
-            os.replace(tmp, path)
-        finally:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
+        _utils.atomic_write_json(path, payload)
     except OSError as exc:
         logger.warning("presence: cannot write state file %s (%s)", path, exc)
 
@@ -506,22 +497,11 @@ class PresenceMonitor:
         cutoff = self._wall_clock() - days * 86400
         out: list[dict[str, Any]] = []
         try:
-            with path.open("r", encoding="utf-8") as f:
-                for raw in f:
-                    stripped = raw.strip()
-                    if not stripped:
-                        continue
-                    try:
-                        obj = json.loads(stripped)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(obj, dict):
-                        continue
-                    ts = obj.get("ts_unix")
-                    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
-                        continue
-                    if ts >= cutoff:
-                        out.append(obj)
+            out = [
+                obj
+                for obj in _utils.jsonl_read(path)
+                if obj.get("ts_unix", 0.0) >= cutoff
+            ]
         except (OSError, PermissionError) as exc:
             logger.warning("presence: cannot read log %s for report (%s)", path, exc)
         return out
@@ -649,10 +629,7 @@ class PresenceMonitor:
             **snap,
         }
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(line, ensure_ascii=False) + "\n")
-                f.flush()
+            _utils.jsonl_append(path, line)
         except (OSError, PermissionError) as exc:
             logger.warning("presence: cannot append log %s (%s)", path, exc)
 
