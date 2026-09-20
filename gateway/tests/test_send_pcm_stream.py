@@ -89,7 +89,6 @@ BYTES_PER_FRAME = SAMPLES_PER_FRAME * 2
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_stream_pushes_one_frame_per_full_chunk(fake_opuslib):
     """A chunk that is exactly one Opus frame produces one Opus frame out."""
     chunk = b"\x01\x00" * SAMPLES_PER_FRAME  # 1920 bytes = 1 frame
@@ -110,7 +109,6 @@ async def test_stream_pushes_one_frame_per_full_chunk(fake_opuslib):
     assert esp32.tts_states == ["start", "stop"]
 
 
-@pytest.mark.asyncio
 async def test_stream_realigns_misaligned_chunks_into_frames(fake_opuslib):
     """Producers emit chunks at arbitrary boundaries; we slice into frames.
 
@@ -148,7 +146,6 @@ async def test_stream_realigns_misaligned_chunks_into_frames(fake_opuslib):
     # short buffers in future refactors.
 
 
-@pytest.mark.asyncio
 async def test_stream_flushes_trailing_partial_frame_as_zero_padded(
     fake_opuslib,
 ):
@@ -175,7 +172,6 @@ async def test_stream_flushes_trailing_partial_frame_as_zero_padded(
     assert encoder_class is _FakeOpusEncoder  # sanity
 
 
-@pytest.mark.asyncio
 async def test_stream_skips_empty_chunks(fake_opuslib):
     """Empty chunks act as heartbeats and don't produce audio."""
     full = b"\x01\x00" * SAMPLES_PER_FRAME
@@ -189,7 +185,6 @@ async def test_stream_skips_empty_chunks(fake_opuslib):
     assert esp32.frames == [b"opus_stream_1"]
 
 
-@pytest.mark.asyncio
 async def test_stream_empty_stream_emits_no_frames_but_no_error(fake_opuslib):
     """A producer that yields nothing still gets a clean start/stop pair.
 
@@ -209,7 +204,6 @@ async def test_stream_empty_stream_emits_no_frames_but_no_error(fake_opuslib):
     assert esp32.tts_states == ["start", "stop"]
 
 
-@pytest.mark.asyncio
 async def test_stream_default_source_label(fake_opuslib):
     """Without ``source_label``, the return dict tags the push as 'stream'."""
     esp32 = _FakeESP32(connected=True)
@@ -224,7 +218,6 @@ async def test_stream_default_source_label(fake_opuslib):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_stream_resamples_chunks_when_source_rate_differs(
     fake_opuslib, monkeypatch,
 ):
@@ -275,7 +268,6 @@ async def test_stream_resamples_chunks_when_source_rate_differs(
     assert call_count == 1
 
 
-@pytest.mark.asyncio
 async def test_stream_handles_odd_byte_chunk_boundaries(fake_opuslib):
     """Odd-byte chunks at a non-device rate do not crash the resampler.
 
@@ -302,7 +294,6 @@ async def test_stream_handles_odd_byte_chunk_boundaries(fake_opuslib):
     assert len(esp32.frames) >= 1
 
 
-@pytest.mark.asyncio
 async def test_stream_skips_resample_at_device_rate(
     fake_opuslib, monkeypatch,
 ):
@@ -329,14 +320,12 @@ async def test_stream_skips_resample_at_device_rate(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_stream_rejects_missing_gateway(fake_opuslib):
     """No gateway → RuntimeError without touching the iterator."""
     with pytest.raises(RuntimeError, match="gateway"):
         await send_pcm_stream(None, _aiter([b"\x01\x00" * SAMPLES_PER_FRAME]))  # type: ignore[arg-type]
 
 
-@pytest.mark.asyncio
 async def test_stream_rejects_disconnected_device(fake_opuslib):
     """Disconnected device fails fast before iterating."""
     esp32 = _FakeESP32(connected=False)
@@ -350,16 +339,20 @@ async def test_stream_rejects_disconnected_device(fake_opuslib):
     assert esp32.tts_states == []
 
 
-@pytest.mark.asyncio
-async def test_stream_blocks_protocol_v2(fake_opuslib):
-    """v2 binary protocol is rejected, no encode happens."""
+@pytest.mark.parametrize(
+    ("protocol_version", "error_match"),
+    [(2, "protocol v1"), (3, r"v3")],
+    ids=["protocol-v2", "protocol-v3"],
+)
+async def test_stream_blocks_non_v1_protocol(fake_opuslib, protocol_version, error_match):
+    """v2/v3 binary protocol is rejected, no encode happens."""
     from types import SimpleNamespace
 
     esp32 = _FakeESP32(connected=True)
-    esp32.connection = SimpleNamespace(protocol_version=2)
+    esp32.connection = SimpleNamespace(protocol_version=protocol_version)
     gateway = _FakeGateway(esp32)
 
-    with pytest.raises(RuntimeError, match="protocol v1"):
+    with pytest.raises(RuntimeError, match=error_match):
         await send_pcm_stream(
             gateway, _aiter([b"\x01\x00" * SAMPLES_PER_FRAME])
         )
@@ -368,22 +361,6 @@ async def test_stream_blocks_protocol_v2(fake_opuslib):
     assert esp32.frames == []
 
 
-@pytest.mark.asyncio
-async def test_stream_blocks_protocol_v3(fake_opuslib):
-    """v3 binary protocol is rejected, same path as v2."""
-    from types import SimpleNamespace
-
-    esp32 = _FakeESP32(connected=True)
-    esp32.connection = SimpleNamespace(protocol_version=3)
-    gateway = _FakeGateway(esp32)
-
-    with pytest.raises(RuntimeError, match=r"v3"):
-        await send_pcm_stream(
-            gateway, _aiter([b"\x01\x00" * SAMPLES_PER_FRAME])
-        )
-
-
-@pytest.mark.asyncio
 async def test_stream_reports_missing_opuslib(monkeypatch):
     """When ``opuslib`` is unavailable the error names the install hint."""
     # Ensure opuslib import fails by removing the cached module if any
@@ -404,7 +381,6 @@ async def test_stream_reports_missing_opuslib(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_stream_translates_mid_stream_disconnect(fake_opuslib):
     """Device disconnect mid-stream becomes a clear RuntimeError."""
 
@@ -440,7 +416,6 @@ async def test_stream_translates_mid_stream_disconnect(fake_opuslib):
     assert "stop" in esp32.tts_states
 
 
-@pytest.mark.asyncio
 async def test_stream_translates_disconnect_before_start(fake_opuslib):
     """ConnectionError on start notification is reported clearly."""
 
@@ -470,7 +445,6 @@ async def test_stream_translates_disconnect_before_start(fake_opuslib):
     assert esp32.tts_states == ["start"]
 
 
-@pytest.mark.asyncio
 async def test_stream_translates_encoder_error(fake_opuslib, monkeypatch):
     """A failure inside ``Encoder.encode`` becomes a clean RuntimeError."""
 
@@ -493,7 +467,6 @@ async def test_stream_translates_encoder_error(fake_opuslib, monkeypatch):
         )
 
 
-@pytest.mark.asyncio
 async def test_stream_re_paces_after_producer_pause(fake_opuslib):
     """Producer pause must not cause a post-pause frame burst.
 

@@ -32,7 +32,6 @@ def test_create_server():
     assert server.name == "stackchanmcp"
 
 
-@pytest.mark.asyncio
 async def test_list_tools_includes_get_head_angles():
     """get_head_angles is exposed to MCP clients."""
     server = create_server()
@@ -45,7 +44,6 @@ async def test_list_tools_includes_get_head_angles():
     assert "get_head_angles" in tool_names
 
 
-@pytest.mark.asyncio
 async def test_set_volume_routes_through_control(monkeypatch):
     """set_volume is a gateway handler that persists via control.set_volume."""
     from stackchan_mcp import toolkit
@@ -94,7 +92,6 @@ def _make_relay_gateway(response_text: str = "{}"):
     return calls, FakeGateway()
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "arguments", "expected_call", "response_text", "assert_payload"),
     [
@@ -169,7 +166,6 @@ async def test_device_tool_relays(
         assert json.loads(result.root.content[0].text) == assert_payload
 
 
-@pytest.mark.asyncio
 async def test_list_tools_includes_set_neutral_pose():
     """set_neutral_pose is exposed with the recommended yaw/pitch range."""
     server = create_server()
@@ -191,7 +187,6 @@ async def test_list_tools_includes_set_neutral_pose():
 
 
 
-@pytest.mark.asyncio
 async def test_list_tools_includes_set_mouth_sequence():
     """set_mouth_sequence is exposed to MCP clients with an array schema."""
     server = create_server()
@@ -221,7 +216,6 @@ async def test_list_tools_includes_set_mouth_sequence():
     assert set(item_schema["required"]) == {"shape", "duration_ms"}
 
 
-@pytest.mark.asyncio
 async def test_list_tools_includes_say():
     """say is exposed to MCP clients with text required."""
     server = create_server()
@@ -241,7 +235,6 @@ async def test_list_tools_includes_say():
     assert schema["required"] == ["text"]
 
 
-@pytest.mark.asyncio
 async def test_say_unknown_voice_returns_clean_error():
     """say with an unknown voice returns a clean error JSON, not a traceback.
 
@@ -265,7 +258,6 @@ async def test_say_unknown_voice_returns_clean_error():
     assert "nonexistent_engine" in payload["error"]
 
 
-@pytest.mark.asyncio
 async def test_say_rejects_empty_text_with_clean_error():
     """say with empty text returns a clean ValueError-shaped error."""
     server = create_server()
@@ -281,7 +273,6 @@ async def test_say_rejects_empty_text_with_clean_error():
     assert "text" in payload["error"]
 
 
-@pytest.mark.asyncio
 async def test_say_returns_clean_error_when_device_disconnected(monkeypatch):
     """say without a connected ESP32 surfaces a clean MCP error JSON.
 
@@ -318,7 +309,6 @@ async def test_say_returns_clean_error_when_device_disconnected(monkeypatch):
     assert "esp32" in msg or "device" in msg
 
 
-@pytest.mark.asyncio
 async def test_default_registry_includes_voicevox():
     """The default registry registers VOICEVOX at import time.
 
@@ -337,7 +327,6 @@ async def test_default_registry_includes_voicevox():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_say_returns_error_json_when_voicevox_returns_5xx(monkeypatch):
     """A 503 from VOICEVOX surfaces as ``{"error": ...}``, not a traceback."""
     httpx = pytest.importorskip("httpx")
@@ -389,7 +378,6 @@ async def test_say_returns_error_json_when_voicevox_returns_5xx(monkeypatch):
     assert "voicevox" in payload["error"].lower()
 
 
-@pytest.mark.asyncio
 async def test_say_returns_error_json_when_device_disconnects_mid_stream(
     monkeypatch,
 ):
@@ -459,7 +447,6 @@ async def test_say_returns_error_json_when_device_disconnects_mid_stream(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_list_tools_move_head_declares_recommended_pitch_range():
     """move_head schema mirrors M5Stack-recommended 5..85 / yaw -90..90."""
     server = create_server()
@@ -592,7 +579,6 @@ def _assert_rejected_without_dispatch(result, calls):
     ), f"Expected an error signal in {response_text!r}"
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("pitch", [0, 4, -1, -30])
 async def test_move_head_rejects_pitch_below_recommended(monkeypatch, pitch):
     """pitch values below the M5Stack-recommended 5° floor are refused."""
@@ -606,7 +592,6 @@ async def test_move_head_rejects_pitch_below_recommended(monkeypatch, pitch):
     _assert_rejected_without_dispatch(result, calls)
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("pitch", [86, 90, 88, 200])
 async def test_move_head_rejects_pitch_above_recommended(monkeypatch, pitch):
     """pitch values above the M5Stack-recommended 85° ceiling are refused."""
@@ -620,7 +605,6 @@ async def test_move_head_rejects_pitch_above_recommended(monkeypatch, pitch):
     _assert_rejected_without_dispatch(result, calls)
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("yaw", [-91, 91, 200, -1000])
 async def test_move_head_rejects_yaw_out_of_range(monkeypatch, yaw):
     """yaw values outside -90..+90 are refused."""
@@ -634,7 +618,6 @@ async def test_move_head_rejects_yaw_out_of_range(monkeypatch, yaw):
     _assert_rejected_without_dispatch(result, calls)
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("pitch", [5, 45, 85])
 async def test_move_head_accepts_pitch_inside_recommended(monkeypatch, pitch):
     """Boundary and mid-range pitch values are accepted and relayed."""
@@ -654,7 +637,6 @@ async def test_move_head_accepts_pitch_inside_recommended(monkeypatch, pitch):
     assert "error" not in payload
 
 
-@pytest.mark.asyncio
 async def test_move_head_speed_mid_forwards_speed_dps(monkeypatch):
     calls = _make_fake_gateway(monkeypatch)
     server = create_server()
@@ -672,7 +654,6 @@ async def test_move_head_speed_mid_forwards_speed_dps(monkeypatch):
     assert "error" not in payload
 
 
-@pytest.mark.asyncio
 async def test_move_head_without_speed_omits_speed_dps(monkeypatch):
     calls = _make_fake_gateway(monkeypatch)
     server = create_server()
@@ -690,7 +671,6 @@ async def test_move_head_without_speed_omits_speed_dps(monkeypatch):
     assert "error" not in payload
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("pitch", [None, "45", 5.5])
 async def test_move_head_rejects_non_integer_pitch(monkeypatch, pitch):
     """Non-int pitch values are refused before reaching the device."""
@@ -704,7 +684,6 @@ async def test_move_head_rejects_non_integer_pitch(monkeypatch, pitch):
     _assert_rejected_without_dispatch(result, calls)
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("pitch", [True, False])
 async def test_move_head_rejects_boolean_pitch(monkeypatch, pitch):
     """bool is an int subclass in Python; must still be refused for pitch."""
@@ -816,7 +795,6 @@ def test_create_initialization_options_uses_explicit_notify_config(monkeypatch):
     assert channels_options.instructions == STACKCHAN_CHANNEL_INSTRUCTIONS
 
 
-@pytest.mark.asyncio
 async def test_notify_stackchan_event_accepts_channel_method(monkeypatch):
     session = _FakeNotificationSession()
     monkeypatch.setattr("stackchan_mcp.stdio_server._active_session", session)
@@ -830,7 +808,6 @@ async def test_notify_stackchan_event_accepts_channel_method(monkeypatch):
     ]
 
 
-@pytest.mark.asyncio
 async def test_notify_stackchan_event_rejects_unsupported_method(
     monkeypatch,
     caplog,
@@ -878,7 +855,6 @@ class _FakeNotificationSession:
 # ---- Phase F: set_status_text tool + voice-turn Searching... hook -----------
 
 
-@pytest.mark.asyncio
 async def test_list_tools_includes_set_status_text():
     """set_status_text is exposed with a required text string."""
     server = create_server()
@@ -895,9 +871,19 @@ async def test_list_tools_includes_set_status_text():
     assert tool.inputSchema["required"] == ["text"]
 
 
-@pytest.mark.asyncio
-async def test_web_search_shows_searching_during_voice_turn(monkeypatch):
-    """During a voice turn, web_search flips the device status to Searching...."""
+@pytest.mark.parametrize(
+    ("voice_turn_active", "expected_status"),
+    [
+        (True, [stdio_server.control.STATUS_SEARCHING]),
+        (False, []),
+    ],
+    ids=["during-voice-turn", "outside-voice-turn"],
+)
+async def test_web_search_status_bracketed_by_voice_turn(
+    monkeypatch, voice_turn_active, expected_status
+):
+    """During a voice turn, web_search flips the device status to
+    Searching...; outside one (e.g. Claude Desktop), no status text fires."""
     status_calls = []
 
     async def fake_search(query, max_results=None):
@@ -912,34 +898,11 @@ async def test_web_search_shows_searching_during_voice_turn(monkeypatch):
     )
 
     class FakeGateway:
-        voice_turn_active = True
+        pass
+
+    setattr(FakeGateway, "voice_turn_active", voice_turn_active)
 
     await stdio_server._dispatch_mcp_tool(
         "web_search", {"query": "weather"}, FakeGateway()
     )
-    assert status_calls == [stdio_server.control.STATUS_SEARCHING]
-
-
-@pytest.mark.asyncio
-async def test_web_search_no_status_outside_voice_turn(monkeypatch):
-    """Outside a voice turn (e.g. Claude Desktop), no status text fires."""
-    status_calls = []
-
-    async def fake_search(query, max_results=None):
-        return {"results": []}
-
-    async def fake_status(gateway, text):
-        status_calls.append(text)
-
-    monkeypatch.setattr(stdio_server.web_search, "search", fake_search)
-    monkeypatch.setattr(
-        stdio_server.control, "set_device_status_text", fake_status
-    )
-
-    class FakeGateway:
-        voice_turn_active = False
-
-    await stdio_server._dispatch_mcp_tool(
-        "web_search", {"query": "weather"}, FakeGateway()
-    )
-    assert status_calls == []
+    assert status_calls == expected_status

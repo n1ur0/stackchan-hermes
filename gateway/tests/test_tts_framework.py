@@ -89,32 +89,19 @@ def test_default_voice_constant():
     assert DEFAULT_VOICE == "voicevox"
 
 
-@pytest.mark.asyncio
-async def test_synthesize_and_send_rejects_missing_text():
-    """No text -> ValueError before any engine lookup."""
+@pytest.mark.parametrize(
+    "opts",
+    [{}, {"text": "   "}, {"text": 42}],
+    ids=["missing-text", "whitespace-text", "non-string-text"],
+)
+async def test_synthesize_and_send_rejects_invalid_text(opts):
+    """Missing / whitespace-only / non-string text all -> ValueError."""
     reg = EngineRegistry()
     with pytest.raises(ValueError, match="text"):
-        await synthesize_and_send({}, registry=reg)
+        await synthesize_and_send(opts, registry=reg)
 
 
-@pytest.mark.asyncio
-async def test_synthesize_and_send_rejects_empty_text():
-    """Whitespace-only text is rejected the same as empty."""
-    reg = EngineRegistry()
-    with pytest.raises(ValueError, match="text"):
-        await synthesize_and_send({"text": "   "}, registry=reg)
-
-
-@pytest.mark.asyncio
-async def test_synthesize_and_send_rejects_non_string_text():
-    """Non-string text -> ValueError (defensive against bad MCP clients)."""
-    reg = EngineRegistry()
-    with pytest.raises(ValueError, match="text"):
-        await synthesize_and_send({"text": 42}, registry=reg)
-
-
-@pytest.mark.asyncio
-async def test_synthesize_and_send_unregistered_voice_raises():
+async def test_synthesize_and_send_rejects_unregistered_voice():
     """Unregistered voice -> NotImplementedError, listing what's available."""
     reg = EngineRegistry()
     with pytest.raises(NotImplementedError) as exc_info:
@@ -125,7 +112,6 @@ async def test_synthesize_and_send_unregistered_voice_raises():
     assert "(none)" in msg
 
 
-@pytest.mark.asyncio
 async def test_synthesize_and_send_requires_gateway():
     """Validation passes but pipeline refuses without a gateway argument.
 
@@ -140,7 +126,6 @@ async def test_synthesize_and_send_requires_gateway():
         await synthesize_and_send({"text": "hello"}, registry=reg)
 
 
-@pytest.mark.asyncio
 async def test_synthesize_and_send_voice_default_falls_back():
     """Empty/missing 'voice' falls back to DEFAULT_VOICE."""
     reg = EngineRegistry()
@@ -156,7 +141,6 @@ async def test_synthesize_and_send_voice_default_falls_back():
     assert DEFAULT_VOICE in str(exc_info.value)
 
 
-@pytest.mark.asyncio
 async def test_synthesize_and_send_lists_available_engines_in_error():
     """Error message names what *is* registered so callers can pick correctly."""
     reg = EngineRegistry()

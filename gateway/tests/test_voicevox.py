@@ -91,7 +91,6 @@ def test_default_speaker_falls_back_on_invalid_env(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_synthesize_calls_audio_query_then_synthesis():
     """Two HTTP calls in order: /audio_query, then /synthesis."""
     captured: list[dict] = []
@@ -114,7 +113,6 @@ async def test_synthesize_calls_audio_query_then_synthesis():
     assert len(pcm) > 0
 
 
-@pytest.mark.asyncio
 async def test_synthesize_uses_speaker_id_override():
     """speaker_id in opts overrides the engine's default."""
     captured: list[dict] = []
@@ -131,7 +129,6 @@ async def test_synthesize_uses_speaker_id_override():
     assert captured[1]["params"]["speaker"] == "14"
 
 
-@pytest.mark.asyncio
 async def test_synthesize_resamples_24khz_wav_to_16khz():
     """VOICEVOX's 24 kHz output is resampled down to the device's 16 kHz."""
     captured: list[dict] = []
@@ -152,7 +149,6 @@ async def test_synthesize_resamples_24khz_wav_to_16khz():
     assert 950 <= len(decoded) <= 970
 
 
-@pytest.mark.asyncio
 async def test_synthesize_rejects_empty_text():
     """Empty/whitespace text fails fast before any HTTP call."""
     captured: list[dict] = []
@@ -165,7 +161,6 @@ async def test_synthesize_rejects_empty_text():
     assert captured == []  # never reached the network
 
 
-@pytest.mark.asyncio
 async def test_synthesize_rejects_non_int_speaker_id():
     """Non-integer speaker_id is a clean ValueError, not a TypeError later."""
     transport = httpx.MockTransport(_build_handler([]))
@@ -175,7 +170,6 @@ async def test_synthesize_rejects_non_int_speaker_id():
         await engine.synthesize("hello", speaker_id="not-an-int")
 
 
-@pytest.mark.asyncio
 async def test_synthesize_propagates_http_errors():
     """A non-2xx response from VOICEVOX surfaces as an httpx error.
 
