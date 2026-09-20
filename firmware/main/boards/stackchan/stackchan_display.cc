@@ -19,21 +19,6 @@
 //   - CONFIG_STACKCHAN_SERVO_FEETECH: MIT clean-room driver vendored at
 //     firmware/components/feetech_scs/.
 // Both drivers share the same begin / WritePos / ReadPos call signatures
-// used by this board, but their WritePos success value differs (see
-// ServoWritePosOk() below). The rest of stackchan.cc treats both drivers
-// uniformly through the ScsBus type alias plus that helper.
-#if CONFIG_STACKCHAN_SERVO_FEETECH
-#include "feetech_scs.h"
-using ScsBus = FeetechScs;
-// FeetechScs::WritePos returns 0 on ACK and -1 on bus error.
-static inline bool ServoWritePosOk(int r) { return r >= 0; }
-#else
-#include "SCSCL.h"
-using ScsBus = SCSCL;
-// SCSCL::WritePos returns 1 on ACK, 0 on ACK timeout, -1 on bus error.
-// Treat ACK timeout as failure to keep the original behaviour intact.
-static inline bool ServoWritePosOk(int r) { return r > 0; }
-#endif
 #include "avatar_images.h"
 #include "avatar_set.h"
 #include "avatar_set_fetcher.h"
@@ -522,4 +507,3 @@ bool StackChanBoard::SetMouthShape(const char* shape) {
     return RenderAvatarLocked();
 
 }
-
