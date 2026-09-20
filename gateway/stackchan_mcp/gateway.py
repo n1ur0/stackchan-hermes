@@ -15,6 +15,7 @@ from aiohttp import web
 
 from . import activity_log
 from .capture_server import create_capture_app, stage_avatar_set
+from .choreographer import Choreographer
 from .esp32_client import ESP32Manager
 from .heartbeat import HeartbeatRunner
 from .mdns_advertiser import MdnsAdvertiser
@@ -23,6 +24,16 @@ from .presence import PresenceMonitor, PresenceState
 from .proactive import ProactiveSpeaker
 
 logger = logging.getLogger(__name__)
+
+
+def _gateway_token() -> str:
+    """The gateway's shared device token (STACKCHAN_TOKEN / BEARER_TOKEN)."""
+    return os.getenv("STACKCHAN_TOKEN") or os.getenv("BEARER_TOKEN") or ""
+
+
+def _token_or_default(specific: str | None, shared: str) -> str:
+    """A specific token override, else the shared gateway token."""
+    return specific or shared
 
 
 def _record_presence_transition(old: PresenceState, new: PresenceState) -> None:
@@ -53,6 +64,8 @@ class Gateway:
         self.esp32 = ESP32Manager()
         self._running = False
         self._http_runner: web.AppRunner | None = None
+        # In-conversation body language (see :mod:`stackchan_mcp.choreographer`).
+        self.choreo = Choreographer(self)
         # Phase 4.5 avatar: kept so load_avatar_set can stage payloads
         # against the same web.Application that serves /avatar_set/{id}.
         self._capture_app: web.Application | None = None
@@ -170,11 +183,8 @@ class Gateway:
         WebSocket token so remote capture uploads are protected whenever the
         gateway itself is protected.
         """
-        return (
-            os.getenv("VISION_TOKEN")
-            or os.getenv("STACKCHAN_TOKEN")
-            or os.getenv("BEARER_TOKEN")
-            or ""
+        return _token_or_default(
+            os.getenv("VISION_TOKEN"), _gateway_token()
         )
 
     @property
@@ -199,11 +209,8 @@ class Gateway:
         STACKCHAN_AUDIO_HOOK_TOKEN can be set separately. Falls back to
         STACKCHAN_TOKEN so a single-token setup works out of the box.
         """
-        return (
-            os.getenv("STACKCHAN_AUDIO_HOOK_TOKEN")
-            or os.getenv("STACKCHAN_TOKEN")
-            or os.getenv("BEARER_TOKEN")
-            or ""
+        return _token_or_default(
+            os.getenv("STACKCHAN_AUDIO_HOOK_TOKEN"), _gateway_token()
         )
 
     @property
@@ -217,11 +224,8 @@ class Gateway:
         / BEARER_TOKEN when STACKCHAN_PCM_TOKEN is not configured so
         single-token local development keeps working.
         """
-        return (
-            os.getenv("STACKCHAN_PCM_TOKEN")
-            or os.getenv("STACKCHAN_TOKEN")
-            or os.getenv("BEARER_TOKEN")
-            or ""
+        return _token_or_default(
+            os.getenv("STACKCHAN_PCM_TOKEN"), _gateway_token()
         )
 
     async def start(self, *, advertise_mdns: bool = True) -> None:

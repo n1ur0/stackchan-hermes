@@ -29,10 +29,7 @@ class FakeESP32:
         if name == "self.robot.get_head_angles":
             if self.fail_angles:
                 return None, {"code": -32000, "message": "boom"}
-            return (
-                {"content": [{"type": "text", "text": json.dumps(self.angles)}]},
-                None,
-            )
+            return {"content": [{"type": "text", "text": json.dumps(self.angles)}]}, None
         return {"ok": True}, None
 
 
@@ -48,6 +45,35 @@ def make_runner(gateway=None, **kw) -> HeartbeatRunner:
     return HeartbeatRunner(gateway or FakeGateway(), **kw)
 
 
+def rig(**kw) -> tuple[FakeGateway, HeartbeatRunner]:
+    gw = FakeGateway()
+    return gw, make_runner(gw, **kw)
+
+
+def faces(gw: FakeGateway) -> list[str]:
+    return [a["face"] for n, a in gw.esp32.calls if n == "self.display.set_avatar"]
+
+
+def moves(gw: FakeGateway) -> list[dict]:
+    return [a for n, a in gw.esp32.calls if n == "self.robot.set_head_angles"]
+
+
+def install_fast_sleep(monkeypatch):
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay):
+        # The scheduling sleep is >= 10 s; gesture-internal sleeps are short.
+        await real_sleep(0)
+
+    monkeypatch.setattr(hb.asyncio, "sleep", fast_sleep)
+
+
+async def run_until(runner, event, *, timeout=2.0):
+    runner.start()
+    await asyncio.wait_for(event.wait(), timeout=timeout)
+    await runner.stop()
+
+
 # ---- parse_quiet_hours / is_quiet ----------------------------------
 
 
@@ -56,17 +82,15 @@ def test_parse_quiet_hours_normal():
 
 
 def test_parse_quiet_hours_off_and_empty():
-    assert parse_quiet_hours("off") is None
-    assert parse_quiet_hours("") is None
-    assert parse_quiet_hours("  OFF ") is None
+    for value in ("off", "", "  OFF "):
+        assert parse_quiet_hours(value) is None
 
 
 def test_parse_quiet_hours_malformed_raises():
     # "22-08" stays valid: time.fromisoformat("22") == 22:00 on 3.11+.
-    with pytest.raises(ValueError):
-        parse_quiet_hours("nonsense")
-    with pytest.raises(ValueError):
-        parse_quiet_hours("25:00-08:00")
+    for value in ("nonsense", "25:00-08:00"):
+        with pytest.raises(ValueError):
+            parse_quiet_hours(value)
 
 
 def test_is_quiet_midnight_crossing():
@@ -90,9 +114,7 @@ def test_is_quiet_same_day_range_and_disabled():
 
 def test_compute_delay_within_jitter_band():
     rng = random.Random(1)
-    for _ in range(50):
-        d = compute_delay_s(30.0, 0.25, rng)
-        assert 30 * 60 * 0.75 <= d <= 30 * 60 * 1.25
+    assert all(30 * 60 * 0.75 <= compute_delay_s(30.0, 0.25, rng) <= 30 * 60 * 1.25 for _ in range(50))
 
 
 def test_compute_delay_floor():
@@ -109,10 +131,9 @@ def test_from_env_disabled_by_default(monkeypatch):
 
 
 def test_from_env_invalid_or_nonpositive(monkeypatch):
-    monkeypatch.setenv("STACKCHAN_HEARTBEAT_INTERVAL_MIN", "abc")
-    assert HeartbeatRunner.from_env(FakeGateway()) is None
-    monkeypatch.setenv("STACKCHAN_HEARTBEAT_INTERVAL_MIN", "0")
-    assert HeartbeatRunner.from_env(FakeGateway()) is None
+    for value in ("abc", "0"):
+        monkeypatch.setenv("STACKCHAN_HEARTBEAT_INTERVAL_MIN", value)
+        assert HeartbeatRunner.from_env(FakeGateway()) is None
 
 
 def test_from_env_enabled(monkeypatch):
@@ -130,15 +151,15 @@ def test_from_env_enabled(monkeypatch):
 
 
 def test_skip_when_disconnected():
-    runner = make_runner()
-    runner._gateway.esp32.device_connected = False
+    gw, runner = rig()
+    gw.esp32.device_connected = False
     assert runner._skip_reason() == "no device connected"
 
 
 @pytest.mark.asyncio
 async def test_skip_when_audio_busy():
-    runner = make_runner()
-    async with runner._gateway.esp32.tts_lock:
+    gw, runner = rig()
+    async with gw.esp32.tts_lock:
         assert runner._skip_reason() == "audio pipeline busy"
     assert runner._skip_reason() is None
 
@@ -152,35 +173,27 @@ def test_skip_in_quiet_hours(monkeypatch):
 
 
 def test_skip_during_voice_turn():
-    # A voice turn (STT → Hermes) holds no tts_lock, so the heartbeat
-    # must consult the bridge's voice_turn_active flag too — otherwise a
-    # gesture lands mid-conversation (design principle #1).
-    gw = FakeGateway()
+    # No tts_lock is held for a voice turn; the flag must suppress too.
+    gw, runner = rig()
     gw.voice_turn_active = True
-    runner = make_runner(gw)
     assert runner._skip_reason() == "voice turn active"
     gw.voice_turn_active = False
     assert runner._skip_reason() is None
 
 
 def test_skip_during_multiturn_gap(monkeypatch):
-    # Between an auto-continued turn and the user's answer, voice_turn_active
-    # is False (the next turn hasn't POSTed) but multiturn_active covers the
-    # gap so a gesture can't land mid-conversation.
+    # Between an auto-continued turn and the user's answer, multiturn_active
+    # covers the gap so a gesture can't land mid-conversation.
     from stackchan_mcp.multiturn import MultiturnSession
 
-    gw = FakeGateway()
+    gw, runner = rig()
     gw.multiturn = MultiturnSession()
     gw.multiturn_active = True
     gw.multiturn.note_continuation(100.0)
-    runner = make_runner(gw)
-    # Fresh gap (10s in) → suppressed.
-    monkeypatch.setattr(runner, "_monotonic", lambda: 110.0)
-    assert runner._skip_reason() == "multiturn continuation"
-    # The gap goes stale past the session timeout → no longer suppressed
-    # (a lost answer must never wedge the heartbeat off forever).
-    monkeypatch.setattr(runner, "_monotonic", lambda: 100.0 + 9999.0)
-    assert runner._skip_reason() is None
+    # Fresh gap (10s in) → suppressed; stale past the timeout → free again.
+    for at, expected in ((110.0, "multiturn continuation"), (100.0 + 9999.0, None)):
+        monkeypatch.setattr(runner, "_monotonic", lambda: at)
+        assert runner._skip_reason() == expected
     # Flag cleared → not suppressed regardless of timing.
     gw.multiturn_active = False
     monkeypatch.setattr(runner, "_monotonic", lambda: 110.0)
@@ -193,53 +206,44 @@ def test_skip_during_multiturn_gap(monkeypatch):
 @pytest.mark.asyncio
 async def test_gesture_expression_returns_to_idle():
     gw = FakeGateway()
-    runner = make_runner(gw)
-    await runner._gesture_expression()
-    faces = [a["face"] for n, a in gw.esp32.calls if n == "self.display.set_avatar"]
-    assert len(faces) == 2
-    assert faces[-1] == "idle"
+    await make_runner(gw)._gesture_expression()
+    assert len(faces(gw)) == 2
+    assert faces(gw)[-1] == "idle"
 
 
 @pytest.mark.asyncio
 async def test_gesture_glance_restores_home_angles():
     gw = FakeGateway()
-    runner = make_runner(gw)
-    await runner._gesture_glance()
-    moves = [a for n, a in gw.esp32.calls if n == "self.robot.set_head_angles"]
-    assert moves, "glance should move the head when angles are readable"
-    assert moves[-1] == {"yaw": 10, "pitch": 40}
-    faces = [a["face"] for n, a in gw.esp32.calls if n == "self.display.set_avatar"]
-    assert faces[-1] == "idle"
+    await make_runner(gw)._gesture_glance()
+    mv = moves(gw)
+    assert mv, "glance should move the head when angles are readable"
+    assert mv[-1] == {"yaw": 10, "pitch": 40}
+    assert faces(gw)[-1] == "idle"
 
 
 @pytest.mark.asyncio
 async def test_gesture_glance_without_angles_skips_head():
     gw = FakeGateway()
     gw.esp32.fail_angles = True
-    runner = make_runner(gw)
-    await runner._gesture_glance()
-    moves = [a for n, a in gw.esp32.calls if n == "self.robot.set_head_angles"]
-    assert moves == []
-    faces = [a["face"] for n, a in gw.esp32.calls if n == "self.display.set_avatar"]
-    assert faces[-1] == "idle"
+    await make_runner(gw)._gesture_glance()
+    assert moves(gw) == []
+    assert faces(gw)[-1] == "idle"
 
 
 @pytest.mark.asyncio
 async def test_gesture_nod_keeps_pitch_in_range():
     gw = FakeGateway()
     gw.esp32.angles = {"yaw": 0, "pitch": 6}  # near lower bound
-    runner = make_runner(gw)
-    await runner._gesture_nod()
-    moves = [a for n, a in gw.esp32.calls if n == "self.robot.set_head_angles"]
-    assert moves
-    assert all(5 <= a["pitch"] <= 85 for a in moves)
-    assert moves[-1] == {"yaw": 0, "pitch": 6}
+    await make_runner(gw)._gesture_nod()
+    mv = moves(gw)
+    assert mv
+    assert all(5 <= a["pitch"] <= 85 for a in mv)
+    assert mv[-1] == {"yaw": 0, "pitch": 6}
 
 
 @pytest.mark.asyncio
 async def test_read_head_angles_bad_payload():
-    gw = FakeGateway()
-    runner = make_runner(gw)
+    gw, runner = rig()
 
     async def weird(name, arguments):
         return {"content": [{"type": "text", "text": "not json"}]}, None
@@ -253,42 +257,22 @@ async def test_read_head_angles_bad_payload():
 
 @pytest.mark.asyncio
 async def test_loop_ticks_and_stops(monkeypatch):
-    gw = FakeGateway()
-    runner = make_runner(gw, interval_min=1.0, jitter=0.0)
-
+    _, runner = rig(interval_min=1.0, jitter=0.0)
+    install_fast_sleep(monkeypatch)
     ticked = asyncio.Event()
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay):
-        # The scheduling sleep is >= 10 s; gesture-internal sleeps are
-        # short. Collapse both to keep the test instant.
-        await real_sleep(0)
-
-    monkeypatch.setattr(hb.asyncio, "sleep", fast_sleep)
 
     async def one_gesture():
         ticked.set()
 
     monkeypatch.setattr(runner, "_perform_gesture", one_gesture)
-
-    runner.start()
-    await asyncio.wait_for(ticked.wait(), timeout=2.0)
-    await runner.stop()
+    await run_until(runner, ticked)
     assert runner._task is None
 
 
 @pytest.mark.asyncio
 async def test_loop_survives_gesture_failure(monkeypatch):
-    gw = FakeGateway()
-    runner = make_runner(gw, interval_min=1.0, jitter=0.0)
-
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(delay):
-        await real_sleep(0)
-
-    monkeypatch.setattr(hb.asyncio, "sleep", fast_sleep)
-
+    _, runner = rig(interval_min=1.0, jitter=0.0)
+    install_fast_sleep(monkeypatch)
     count = 0
     second_tick = asyncio.Event()
 
@@ -300,10 +284,7 @@ async def test_loop_survives_gesture_failure(monkeypatch):
         second_tick.set()
 
     monkeypatch.setattr(runner, "_perform_gesture", flaky)
-
-    runner.start()
-    await asyncio.wait_for(second_tick.wait(), timeout=2.0)
-    await runner.stop()
+    await run_until(runner, second_tick)
     assert count >= 2
 
 
@@ -312,16 +293,9 @@ async def test_loop_survives_gesture_failure(monkeypatch):
 
 def _clear_speak_env(monkeypatch):
     for name in (
-        "STACKCHAN_HEARTBEAT_SPEAK",
-        "STACKCHAN_HEARTBEAT_SPEAK_COOLDOWN_MIN",
-        "STACKCHAN_HEARTBEAT_SPEAK_MAX_PER_DAY",
-        "STACKCHAN_WEATHER_AREA",
-        "STACKCHAN_WEATHER_CITY",
-        "STACKCHAN_WEATHER_POP_THRESHOLD",
-        "STACKCHAN_WEATHER_WINDOW",
-        "STACKCHAN_MEMO_WINDOW",
-        "STACKCHAN_HEARTBEAT_STATE",
-        "STACKCHAN_HEARTBEAT_GESTURES",
+        "STACKCHAN_HEARTBEAT_SPEAK", "STACKCHAN_HEARTBEAT_SPEAK_COOLDOWN_MIN", "STACKCHAN_HEARTBEAT_SPEAK_MAX_PER_DAY",
+        "STACKCHAN_WEATHER_AREA", "STACKCHAN_WEATHER_CITY", "STACKCHAN_WEATHER_POP_THRESHOLD", "STACKCHAN_WEATHER_WINDOW",
+        "STACKCHAN_MEMO_WINDOW", "STACKCHAN_HEARTBEAT_STATE", "STACKCHAN_HEARTBEAT_GESTURES",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -329,10 +303,9 @@ def _clear_speak_env(monkeypatch):
 def test_speak_config_off_by_default(monkeypatch):
     _clear_speak_env(monkeypatch)
     assert hb.speak_config_from_env() is None
-    monkeypatch.setenv("STACKCHAN_HEARTBEAT_SPEAK", "0")
-    assert hb.speak_config_from_env() is None
-    monkeypatch.setenv("STACKCHAN_HEARTBEAT_SPEAK", "nonsense")
-    assert hb.speak_config_from_env() is None
+    for value in ("0", "nonsense"):
+        monkeypatch.setenv("STACKCHAN_HEARTBEAT_SPEAK", value)
+        assert hb.speak_config_from_env() is None
 
 
 def test_speak_config_enabled_defaults(monkeypatch, tmp_path):
@@ -410,15 +383,12 @@ def test_speak_skip_while_recording(monkeypatch, tmp_path):
 
 
 def test_speak_skip_recent_interaction(monkeypatch, tmp_path):
-    gw = FakeGateway()
-    runner = make_runner(gw, speak=make_speak(tmp_path, cooldown_min=20))
+    gw, runner = rig(speak=make_speak(tmp_path, cooldown_min=20))
     monkeypatch.setattr(hb, "is_recording", lambda: False)
     monkeypatch.setattr(runner, "_monotonic", lambda: 10_000.0)
-
-    gw.last_human_interaction_monotonic = 10_000.0 - 5 * 60  # 5 min ago
-    assert runner._speak_skip_reason() == "recent interaction"
-    gw.last_human_interaction_monotonic = 10_000.0 - 25 * 60  # 25 min ago
-    assert runner._speak_skip_reason() is None
+    for ago, expected in ((5 * 60, "recent interaction"), (25 * 60, None)):
+        gw.last_human_interaction_monotonic = 10_000.0 - ago
+        assert runner._speak_skip_reason() == expected
     gw.last_human_interaction_monotonic = None  # never interacted
     assert runner._speak_skip_reason() is None
 
@@ -505,65 +475,47 @@ def test_memo_snippet_skips_markup_and_blank():
 
 
 def make_weather_runner(tmp_path, monkeypatch, now=dt.time(7, 0)):
-    runner = make_runner(
-        speak=make_speak(tmp_path, weather_area="270000", weather_city="2720900")
-    )
+    runner = make_runner(speak=make_speak(tmp_path, weather_area="270000", weather_city="2720900"))
     monkeypatch.setattr(runner, "_now", lambda: now)
     return runner
 
 
 @pytest.mark.asyncio
-async def test_weather_speaks_once_per_day(tmp_path, monkeypatch):
-    runner = make_weather_runner(tmp_path, monkeypatch)
+@pytest.mark.parametrize(("scenario", "now", "result", "error"), [
+    ("speaks_once", dt.time(7, 0), "rain likely today", None),
+    ("marks_done", dt.time(7, 0), None, None),
+    ("retries", dt.time(7, 0), None, RuntimeError("network down")),
+    ("outside", dt.time(12, 0), None, None),
+])
+async def test_weather_check_scenarios(monkeypatch, tmp_path, scenario, now, result, error):
+    runner = make_weather_runner(tmp_path, monkeypatch, now=now)
     calls = []
 
     async def fake_check(area, city, threshold, *, today=None):
         calls.append((area, city, threshold))
-        return "rain likely today"
+        if scenario == "outside":
+            raise AssertionError("must not fetch outside the window")
+        if error is not None:
+            raise error
+        return result
 
     monkeypatch.setattr(hb.weather, "check_weather", fake_check)
     line = await runner._check_weather()
-    assert line == "rain likely today"
-    assert calls == [("270000", "2720900", 50)]
-    # Daily flag set: no second fetch, no second line.
-    assert await runner._check_weather() is None
-    assert len(calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_weather_normal_day_marks_done_silently(tmp_path, monkeypatch):
-    runner = make_weather_runner(tmp_path, monkeypatch)
-
-    async def fake_check(area, city, threshold, *, today=None):
-        return None
-
-    monkeypatch.setattr(hb.weather, "check_weather", fake_check)
-    assert await runner._check_weather() is None
-    assert runner._state.get("weather_done") == dt.date.today().isoformat()
-
-
-@pytest.mark.asyncio
-async def test_weather_fetch_failure_retries(tmp_path, monkeypatch):
-    runner = make_weather_runner(tmp_path, monkeypatch)
-
-    async def fail(area, city, threshold, *, today=None):
-        raise RuntimeError("network down")
-
-    monkeypatch.setattr(hb.weather, "check_weather", fail)
-    assert await runner._check_weather() is None
-    # Flag NOT set: the next tick inside the window retries.
-    assert "weather_done" not in runner._state
-
-
-@pytest.mark.asyncio
-async def test_weather_outside_window_no_fetch(tmp_path, monkeypatch):
-    runner = make_weather_runner(tmp_path, monkeypatch, now=dt.time(12, 0))
-
-    async def boom(*a, **k):
-        raise AssertionError("must not fetch outside the window")
-
-    monkeypatch.setattr(hb.weather, "check_weather", boom)
-    assert await runner._check_weather() is None
+    if scenario == "speaks_once":
+        assert line == "rain likely today"
+        assert calls == [("270000", "2720900", 50)]
+        # Daily flag set: no second fetch, no second line.
+        assert await runner._check_weather() is None
+        assert len(calls) == 1
+    elif scenario == "marks_done":
+        assert line is None
+        assert runner._state.get("weather_done") == dt.date.today().isoformat()
+    elif scenario == "retries":
+        assert line is None
+        # Flag NOT set: the next tick inside the window retries.
+        assert "weather_done" not in runner._state
+    else:
+        assert line is None
 
 
 # ---- Phase E: tick + speech ------------------------------------------
@@ -571,27 +523,22 @@ async def test_weather_outside_window_no_fetch(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_tick_speak_disabled_without_config():
-    runner = make_runner()  # speak=None
-    assert await runner._tick_speak() is False
+    assert await make_runner()._tick_speak() is False
 
 
 @pytest.mark.asyncio
 async def test_perform_speak_counts_and_returns_to_idle(tmp_path, monkeypatch):
-    gw = FakeGateway()
-    runner = make_runner(gw, speak=make_speak(tmp_path))
+    gw, runner = rig(speak=make_speak(tmp_path))
     spoken = []
 
     async def fake_synth(arguments, *, gateway=None, registry=None):
         spoken.append(arguments["text"])
         return {"ok": True}
 
-    monkeypatch.setattr(
-        "stackchan_mcp.tts.orchestrator.synthesize_and_send", fake_synth
-    )
+    monkeypatch.setattr("stackchan_mcp.tts.orchestrator.synthesize_and_send", fake_synth)
     await runner._perform_speak("test utterance")
     assert spoken == ["test utterance"]
-    faces = [a["face"] for n, a in gw.esp32.calls if n == "self.display.set_avatar"]
-    assert faces == ["happy", "idle"]
+    assert faces(gw) == ["happy", "idle"]
     assert runner._spoken_today() == 1
     # Persisted: a restarted runner sees the same count.
     fresh = make_runner(FakeGateway(), speak=make_speak(tmp_path))
@@ -600,8 +547,7 @@ async def test_perform_speak_counts_and_returns_to_idle(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_tick_speak_suppressed_then_gesture_fallback(tmp_path, monkeypatch):
-    gw = FakeGateway()
-    runner = make_runner(gw, speak=make_speak(tmp_path))
+    _, runner = rig(speak=make_speak(tmp_path))
     monkeypatch.setattr(hb, "is_recording", lambda: True)
     assert await runner._tick_speak() is False
 

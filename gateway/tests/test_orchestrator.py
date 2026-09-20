@@ -12,6 +12,7 @@ from stackchan_mcp.tts.audio_utils import (
     DEVICE_FRAME_DURATION_MS,
     DEVICE_SAMPLE_RATE,
 )
+from tts_fakes import FakeTTSESP32 as _FakeESP32, FakeTTSGateway as _FakeGateway
 
 
 class _PCMEngine(TTSEngine):
@@ -27,35 +28,6 @@ class _PCMEngine(TTSEngine):
         return self._pcm
 
 
-class _FakeESP32:
-    def __init__(self, *, connected: bool = True) -> None:
-        self.device_connected = connected
-        self.frames: list[bytes] = []
-        self.tts_states: list[str] = []
-        # Records the relative order in which audio frames and TTS state
-        # notifications were dispatched, so tests can assert that
-        # ``start`` precedes any frame and ``stop`` trails them.
-        self.events: list[tuple[str, object]] = []
-        # Mirror the production manager's per-device TTS lock so the
-        # orchestrator's ``async with gateway.esp32.tts_lock`` works the
-        # same way under tests as in production. The lock is created
-        # per-fake so each test runs against a fresh instance.
-        self.tts_lock = asyncio.Lock()
-
-    async def send_audio_frame(self, frame: bytes) -> None:
-        self.frames.append(frame)
-        self.events.append(("frame", frame))
-
-    async def send_tts_state(self, state: str) -> None:
-        self.tts_states.append(state)
-        self.events.append(("tts_state", state))
-
-
-class _FakeGateway:
-    def __init__(self, esp32: _FakeESP32) -> None:
-        self.esp32 = esp32
-
-
 @pytest.fixture
 def fake_encode(monkeypatch):
     """Replace encode_opus_frames so tests don't need libopus.
@@ -66,16 +38,12 @@ def fake_encode(monkeypatch):
     """
 
     def fake(pcm: bytes, **kwargs):
-        samples_per_frame = (
-            DEVICE_SAMPLE_RATE * DEVICE_FRAME_DURATION_MS // 1000
-        )
+        samples_per_frame = DEVICE_SAMPLE_RATE * DEVICE_FRAME_DURATION_MS // 1000
         bytes_per_frame = samples_per_frame * 2
         n_full = len(pcm) // bytes_per_frame
         n_partial = 1 if len(pcm) % bytes_per_frame else 0
         n_total = n_full + n_partial
-        return iter(
-            f"opus_frame_{i}".encode() for i in range(n_total)
-        )
+        return iter(f"opus_frame_{i}".encode() for i in range(n_total))
 
     import stackchan_mcp.tts.orchestrator as orchestrator
 
@@ -83,7 +51,6 @@ def fake_encode(monkeypatch):
     return fake
 
 
-@pytest.mark.asyncio
 async def test_pipeline_synthesises_encodes_and_pushes(fake_encode):
     """A full happy-path call synthesises, encodes, and pushes to the device."""
     # 90 ms of PCM @ 16 kHz mono = 1440 samples = 2880 bytes
@@ -122,7 +89,50 @@ async def test_pipeline_synthesises_encodes_and_pushes(fake_encode):
     assert all(kind == "frame" for kind, _ in middle)
 
 
-@pytest.mark.asyncio
+async def test_audio_ready_fires_after_synthesis_before_frames(fake_encode):
+    """on_audio_ready fires once the PCM is loaded, before any frame is pushed.
+
+    The bridge uses this to show the spoken reply as a subtitle only when
+    the audio is actually ready to play — never during the synthesis gap.
+    """
+    order: list[str] = []
+    pcm = b"\x01\x00" * 960  # exactly one 60ms frame
+    engine = _PCMEngine(pcm)
+
+    async def record_ready():
+        # Recorded after synthesis, before send_pcm_audio pushes frames.
+        order.append("audio_ready")
+
+    esp32 = _FakeESP32(connected=True)
+    gateway = _FakeGateway(esp32)
+    monkeypatch = pytest.MonkeyPatch()
+
+    # Capture the push itself so we can assert ordering around it.
+    orig_send = type(esp32).send_audio_frame
+
+    async def tracking_send(self, frame):
+        order.append("frame")
+        return await orig_send(self, frame)
+
+    monkeypatch.setattr(type(esp32), "send_audio_frame", tracking_send)
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    result = await synthesize_and_send(
+        {"text": "hello", "voice": "voicevox"},
+        gateway=gateway,
+        registry=reg,
+        on_audio_ready=record_ready,
+    )
+
+    monkeypatch.undo()
+
+    assert result["frame_count"] == 1
+    # The audio-ready callback fired before any frame reached the wire.
+    assert order == ["audio_ready", "frame"]
+
+
 async def test_pipeline_passes_reference_audio_through(fake_encode):
     """reference_audio is forwarded to engines that support voice cloning."""
     engine = _PCMEngine(b"\x00\x00" * 960)
@@ -145,7 +155,6 @@ async def test_pipeline_passes_reference_audio_through(fake_encode):
     assert engine.calls[0][1]["reference_audio"] == "/tmp/sample.wav"
 
 
-@pytest.mark.asyncio
 async def test_pipeline_raises_when_device_disconnected(fake_encode):
     """Disconnected device fails fast before invoking the engine."""
     engine = _PCMEngine(b"\x00\x00" * 960)
@@ -166,9 +175,15 @@ async def test_pipeline_raises_when_device_disconnected(fake_encode):
     assert engine.calls == []
 
 
-@pytest.mark.asyncio
-async def test_pipeline_blocks_protocol_v2(fake_encode):
-    """Devices that negotiated WebSocket protocol v2 are blocked.
+@pytest.mark.parametrize(
+    ("protocol_version", "error_match"),
+    [(2, "protocol v1"), (3, r"v3")],
+    ids=["protocol-v2", "protocol-v3"],
+)
+async def test_pipeline_blocks_non_v1_protocol(
+    fake_encode, protocol_version, error_match
+):
+    """Devices on WebSocket protocol v2/v3 are blocked.
 
     The gateway emits raw Opus binary frames matching firmware v1; v2/v3
     expect a BinaryProtocol header wrapped around each binary message.
@@ -182,13 +197,13 @@ async def test_pipeline_blocks_protocol_v2(fake_encode):
     pcm = b"\x01\x00" * 1440
     engine = _PCMEngine(pcm)
     esp32 = _FakeESP32(connected=True)
-    esp32.connection = SimpleNamespace(protocol_version=2)
+    esp32.connection = SimpleNamespace(protocol_version=protocol_version)
     gateway = _FakeGateway(esp32)
 
     reg = EngineRegistry()
     reg.register(engine)
 
-    with pytest.raises(RuntimeError, match="protocol v1"):
+    with pytest.raises(RuntimeError, match=error_match):
         await synthesize_and_send(
             {"text": "hello"}, gateway=gateway, registry=reg
         )
@@ -201,7 +216,6 @@ async def test_pipeline_blocks_protocol_v2(fake_encode):
     assert engine.calls == []
 
 
-@pytest.mark.asyncio
 async def test_pipeline_serialises_concurrent_say_calls(fake_encode):
     """Concurrent ``say()`` invocations don't interleave on the same device.
 
@@ -240,12 +254,8 @@ async def test_pipeline_serialises_concurrent_say_calls(fake_encode):
     )
 
     events = esp32.events
-    start_indices = [
-        i for i, e in enumerate(events) if e == ("tts_state", "start")
-    ]
-    stop_indices = [
-        i for i, e in enumerate(events) if e == ("tts_state", "stop")
-    ]
+    start_indices = [i for i, e in enumerate(events) if e == ("tts_state", "start")]
+    stop_indices = [i for i, e in enumerate(events) if e == ("tts_state", "stop")]
     assert len(start_indices) == 2
     assert len(stop_indices) == 2
 
@@ -253,38 +263,9 @@ async def test_pipeline_serialises_concurrent_say_calls(fake_encode):
     #   start_0 < stop_0 < start_1 < stop_1
     # The second utterance cannot begin until the first one finishes
     # its stop notification.
-    assert (
-        start_indices[0]
-        < stop_indices[0]
-        < start_indices[1]
-        < stop_indices[1]
-    )
+    assert start_indices[0] < stop_indices[0] < start_indices[1] < stop_indices[1]
 
 
-@pytest.mark.asyncio
-async def test_pipeline_blocks_protocol_v3(fake_encode):
-    """Devices on protocol v3 are blocked the same way as v2."""
-    from types import SimpleNamespace
-
-    pcm = b"\x01\x00" * 1440
-    engine = _PCMEngine(pcm)
-    esp32 = _FakeESP32(connected=True)
-    esp32.connection = SimpleNamespace(protocol_version=3)
-    gateway = _FakeGateway(esp32)
-
-    reg = EngineRegistry()
-    reg.register(engine)
-
-    with pytest.raises(RuntimeError, match=r"v3"):
-        await synthesize_and_send(
-            {"text": "hi"}, gateway=gateway, registry=reg
-        )
-
-    assert esp32.tts_states == []
-    assert esp32.frames == []
-
-
-@pytest.mark.asyncio
 async def test_pipeline_raises_when_engine_returns_no_pcm(fake_encode):
     """An engine returning empty PCM is a bug, surfaced as a RuntimeError."""
     engine = _PCMEngine(b"")
@@ -322,7 +303,6 @@ class _RaisingEngine(TTSEngine):
         raise self._exc
 
 
-@pytest.mark.asyncio
 async def test_engine_http_error_translated_to_runtime_error(fake_encode):
     """An httpx.HTTPStatusError from the engine becomes a RuntimeError.
 
@@ -350,7 +330,6 @@ async def test_engine_http_error_translated_to_runtime_error(fake_encode):
     assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
 
 
-@pytest.mark.asyncio
 async def test_engine_wave_error_translated_to_runtime_error(fake_encode):
     """A wave.Error (malformed WAV from the engine) becomes a RuntimeError."""
     import wave
@@ -368,7 +347,6 @@ async def test_engine_wave_error_translated_to_runtime_error(fake_encode):
     assert isinstance(exc_info.value.__cause__, wave.Error)
 
 
-@pytest.mark.asyncio
 async def test_engine_value_error_propagates_as_value_error(fake_encode):
     """ValueError stays a ValueError so bad args remain separable from ops failures."""
     reg = EngineRegistry()
@@ -383,7 +361,6 @@ async def test_engine_value_error_propagates_as_value_error(fake_encode):
         )
 
 
-@pytest.mark.asyncio
 async def test_pipeline_translates_mid_stream_disconnect(fake_encode):
     """A ConnectionError from the device mid-stream becomes a RuntimeError.
 
@@ -435,7 +412,6 @@ async def test_pipeline_translates_mid_stream_disconnect(fake_encode):
     assert "stop" in esp32.tts_states
 
 
-@pytest.mark.asyncio
 async def test_opus_encode_error_translated(fake_encode, monkeypatch):
     """A failure in encode_opus_frames becomes a RuntimeError, not a leak."""
 
@@ -458,7 +434,6 @@ async def test_opus_encode_error_translated(fake_encode, monkeypatch):
         )
 
 
-@pytest.mark.asyncio
 async def test_pipeline_paces_frames_at_device_rate(fake_encode, monkeypatch):
     """Frame pushes are spaced at the device's frame_duration to avoid drops.
 
@@ -500,7 +475,6 @@ async def test_pipeline_paces_frames_at_device_rate(fake_encode, monkeypatch):
     assert sleeps[0] == pytest.approx(0.05, rel=0.05)
 
 
-@pytest.mark.asyncio
 async def test_pipeline_disconnect_before_tts_start(fake_encode):
     """ConnectionError on the start notification surfaces clearly.
 

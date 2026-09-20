@@ -1,6 +1,7 @@
 """Tests for the Hermes voice bridge (ask_hermes request shape)."""
 
 import json
+import os
 from typing import Any
 from unittest import mock
 
@@ -8,12 +9,14 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 
-from stackchan_mcp import control, hermes_bridge, multiturn
+from stackchan_mcp import control, hermes_bridge, local_llm, multiturn
 from stackchan_mcp.capture_server import GATEWAY_KEY
 from stackchan_mcp.hermes_bridge import (
     DEFAULT_VOICE_SYSTEM_PROMPT,
     HERMES_VOICE_TOOLS_LINE,
     ask_hermes,
+    ask_hermes_stream,
+    tool_status_text,
 )
 from stackchan_mcp.multiturn import MultiturnSession
 
@@ -35,6 +38,7 @@ def aiohttp_unused_port():
 
 
 async def _run_hermes_stub(handler, aiohttp_unused_port):
+    """Run ``handler`` behind POST /v1/chat/completions; return (runner, base_url)."""
     app = web.Application()
     app.router.add_route("POST", "/v1/chat/completions", handler)
     port = aiohttp_unused_port()
@@ -45,196 +49,147 @@ async def _run_hermes_stub(handler, aiohttp_unused_port):
     return runner, f"http://127.0.0.1:{port}"
 
 
-@pytest.mark.asyncio
-async def test_ask_hermes_system_prompt_carries_tool_guidance(
-    monkeypatch, aiohttp_unused_port
-):
-    """The system message must combine the voice style prompt with the
-    MCP tool-routing guidance — without the latter the agent drifts to
-    its approval-gated built-in tools or fakes completions (observed
-    live in the Phase D2 E2E)."""
+@pytest.fixture
+async def hermes_stub(monkeypatch, aiohttp_unused_port):
+    """Stub Hermes' /v1/chat/completions with HERMES_API_URL already wired.
+
+    Yields ``(received, coop)``: ``received`` captures the payload/headers
+    seen by the stub; ``coop["content"]`` sets the assistant reply and
+    ``coop["status"]``/``coop["text"]`` make the stub answer with an HTTP
+    error instead (default reply: "ok").
+    """
     received: dict[str, Any] = {}
+    coop: dict[str, Any] = {}
 
     async def handle(request: web.Request) -> web.Response:
         received["payload"] = await request.json()
+        received["headers"] = dict(request.headers)
+        if "status" in coop:
+            return web.Response(status=coop["status"], text=coop.get("text", ""))
         return web.json_response(
-            {"choices": [{"message": {"role": "assistant", "content": "yes "}}]}
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": coop.get("content", "ok"),
+                        }
+                    }
+                ]
+            }
         )
 
     runner, base_url = await _run_hermes_stub(handle, aiohttp_unused_port)
     monkeypatch.setenv("HERMES_API_URL", base_url)
-    monkeypatch.delenv("HERMES_API_KEY", raising=False)
-    monkeypatch.delenv("HERMES_VOICE_SYSTEM_PROMPT", raising=False)
     try:
-        reply = await ask_hermes("make a memo")
+        yield received, coop
     finally:
         await runner.cleanup()
 
-    assert reply == "yes"
+
+@pytest.mark.parametrize(
+    ("env_prompt", "explicit_prompt", "user_text", "content"),
+    [
+        # Default voice prompt baked in.
+        (None, None, "make a memo", "yes "),
+        # A custom HERMES_VOICE_SYSTEM_PROMPT replaces the default.
+        ("custom.", None, "hello", "ok"),
+        # An explicit system_prompt= (proactive speaker) beats the env one.
+        ("env-prompt.", "proactive prompt.", "situation test", "welcome back"),
+    ],
+    ids=["default-voice-prompt", "custom-env-prompt", "explicit-overrides-env"],
+)
+async def test_ask_hermes_system_prompt_composition(
+    monkeypatch, hermes_stub, env_prompt, explicit_prompt, user_text, content
+):
+    """The system message always pairs the voice-style prompt with the MCP
+    tool-routing guidance; an explicit system_prompt wins over the env one.
+    (Without the tool line the agent drifts to its approval-gated built-in
+    tools or fakes completions — observed live in the Phase D2 E2E.)"""
+    received, coop = hermes_stub
+    coop["content"] = content
+    monkeypatch.delenv("HERMES_API_KEY", raising=False)
+    if env_prompt is None:
+        monkeypatch.delenv("HERMES_VOICE_SYSTEM_PROMPT", raising=False)
+    else:
+        monkeypatch.setenv("HERMES_VOICE_SYSTEM_PROMPT", env_prompt)
+
+    kwargs: dict[str, str] = {}
+    if explicit_prompt is not None:
+        kwargs["system_prompt"] = explicit_prompt
+    reply = await ask_hermes(user_text, **kwargs)
+
+    # Prefix: explicit prompt > env prompt > baked-in default.
+    assert reply == content.strip()  # trailing whitespace stripped
     system = received["payload"]["messages"][0]
     assert system["role"] == "system"
-    assert system["content"].startswith(DEFAULT_VOICE_SYSTEM_PROMPT)
+    expected_prefix = explicit_prompt or env_prompt or DEFAULT_VOICE_SYSTEM_PROMPT
+    assert system["content"].startswith(expected_prefix)
+    # When overridden, the env prompt must not leak into the message.
+    if explicit_prompt is not None and env_prompt is not None:
+        assert env_prompt not in system["content"]
     assert HERMES_VOICE_TOOLS_LINE in system["content"]
-    assert received["payload"]["messages"][1] == {
-        "role": "user",
-        "content": "make a memo",
-    }
+    assert received["payload"]["messages"][1] == {"role": "user", "content": user_text}
 
 
-@pytest.mark.asyncio
-async def test_ask_hermes_custom_prompt_still_gets_tool_guidance(
-    monkeypatch, aiohttp_unused_port
-):
-    received: dict[str, Any] = {}
-
-    async def handle(request: web.Request) -> web.Response:
-        received["payload"] = await request.json()
-        return web.json_response(
-            {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
-        )
-
-    runner, base_url = await _run_hermes_stub(handle, aiohttp_unused_port)
-    monkeypatch.setenv("HERMES_API_URL", base_url)
-    monkeypatch.setenv("HERMES_VOICE_SYSTEM_PROMPT", "custom.")
+async def test_ask_hermes_error_status_raises(monkeypatch, hermes_stub):
+    """An upstream HTTP error surfaces as RuntimeError with the status."""
+    received, coop = hermes_stub
+    coop["status"] = 500
+    coop["text"] = "boom"
     monkeypatch.delenv("HERMES_API_KEY", raising=False)
-    try:
+    with pytest.raises(RuntimeError, match="status=500"):
         await ask_hermes("hello")
-    finally:
-        await runner.cleanup()
-
-    system = received["payload"]["messages"][0]
-    assert system["content"].startswith("custom.")
-    assert HERMES_VOICE_TOOLS_LINE in system["content"]
-
-
-@pytest.mark.asyncio
-async def test_ask_hermes_explicit_system_prompt_overrides_env(
-    monkeypatch, aiohttp_unused_port
-):
-    """The proactive speaker passes its own prompt via system_prompt=; it
-    must win over HERMES_VOICE_SYSTEM_PROMPT while the tool line still
-    appends (so a proactive turn can still reach the MCP tools)."""
-    received: dict[str, Any] = {}
-
-    async def handle(request: web.Request) -> web.Response:
-        received["payload"] = await request.json()
-        return web.json_response(
-            {"choices": [{"message": {"role": "assistant", "content": "welcome back"}}]}
-        )
-
-    runner, base_url = await _run_hermes_stub(handle, aiohttp_unused_port)
-    monkeypatch.setenv("HERMES_API_URL", base_url)
-    monkeypatch.setenv("HERMES_VOICE_SYSTEM_PROMPT", "env-prompt.")
-    monkeypatch.delenv("HERMES_API_KEY", raising=False)
-    try:
-        reply = await ask_hermes("situation test", system_prompt="proactive prompt.")
-    finally:
-        await runner.cleanup()
-
-    assert reply == "welcome back"
-    system = received["payload"]["messages"][0]
-    assert system["content"].startswith("proactive prompt.")
-    assert "env-prompt." not in system["content"]
-    assert HERMES_VOICE_TOOLS_LINE in system["content"]
-
-
-@pytest.mark.asyncio
-async def test_ask_hermes_error_status_raises(monkeypatch, aiohttp_unused_port):
-    async def handle(request: web.Request) -> web.Response:
-        return web.Response(status=500, text="boom")
-
-    runner, base_url = await _run_hermes_stub(handle, aiohttp_unused_port)
-    monkeypatch.setenv("HERMES_API_URL", base_url)
-    monkeypatch.delenv("HERMES_API_KEY", raising=False)
-    try:
-        with pytest.raises(RuntimeError, match="status=500"):
-            await ask_hermes("hello")
-    finally:
-        await runner.cleanup()
 
 
 # ---- Phase 2: per-conversation Hermes session id ---------------------
 
 
-@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("api_key", "session_arg", "env_session", "expected_header"),
+    [
+        # Per-conversation id wins; Bearer auth sent with the key.
+        ("secret", "stackchan-voice-abc123", None, "stackchan-voice-abc123"),
+        # Without a per-conversation id the fixed HERMES_SESSION_ID is used.
+        ("secret", None, "fixed-id", "fixed-id"),
+        # No key: session continuity gated off, nothing leaks.
+        (None, "stackchan-voice-abc123", None, None),
+    ],
+    ids=["explicit-session-id", "env-fallback-session-id", "no-key-no-session-header"],
+)
 async def test_ask_hermes_sends_conversation_session_id(
-    monkeypatch, aiohttp_unused_port
+    monkeypatch,
+    hermes_stub,
+    api_key,
+    session_arg,
+    env_session,
+    expected_header,
 ):
-    """With the API key set, the supplied per-conversation id is sent as
-    X-Hermes-Session-Id (so Hermes keeps context within a conversation)."""
-    received: dict[str, Any] = {}
+    """The per-conversation id is sent as X-Hermes-Session-Id (explicit arg
+    wins, else HERMES_SESSION_ID) — gated on the API key, with Bearer auth."""
+    received, coop = hermes_stub
+    if api_key is None:
+        monkeypatch.delenv("HERMES_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("HERMES_API_KEY", api_key)
+    if env_session:
+        monkeypatch.setenv("HERMES_SESSION_ID", env_session)
 
-    async def handle(request: web.Request) -> web.Response:
-        received["headers"] = dict(request.headers)
-        return web.json_response(
-            {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
-        )
+    kwargs: dict[str, str] = {}
+    if session_arg is not None:
+        kwargs["session_id"] = session_arg
+    await ask_hermes("hey", **kwargs)
 
-    runner, base_url = await _run_hermes_stub(handle, aiohttp_unused_port)
-    monkeypatch.setenv("HERMES_API_URL", base_url)
-    monkeypatch.setenv("HERMES_API_KEY", "secret")
-    monkeypatch.delenv("HERMES_VOICE_SYSTEM_PROMPT", raising=False)
-    try:
-        await ask_hermes("hey", session_id="stackchan-voice-abc123")
-    finally:
-        await runner.cleanup()
-
-    assert received["headers"]["X-Hermes-Session-Id"] == "stackchan-voice-abc123"
-    assert received["headers"]["Authorization"] == "Bearer secret"
-
-
-@pytest.mark.asyncio
-async def test_ask_hermes_session_id_falls_back_to_env(
-    monkeypatch, aiohttp_unused_port
-):
-    """Without a per-conversation id (other callers / tests) the fixed
-    HERMES_SESSION_ID is used — the pre-Phase-2 behaviour."""
-    received: dict[str, Any] = {}
-
-    async def handle(request: web.Request) -> web.Response:
-        received["headers"] = dict(request.headers)
-        return web.json_response(
-            {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
-        )
-
-    runner, base_url = await _run_hermes_stub(handle, aiohttp_unused_port)
-    monkeypatch.setenv("HERMES_API_URL", base_url)
-    monkeypatch.setenv("HERMES_API_KEY", "secret")
-    monkeypatch.setenv("HERMES_SESSION_ID", "fixed-id")
-    try:
-        await ask_hermes("hey")
-    finally:
-        await runner.cleanup()
-
-    assert received["headers"]["X-Hermes-Session-Id"] == "fixed-id"
+    headers = received["headers"]
+    if expected_header is None:
+        assert "X-Hermes-Session-Id" not in headers
+    else:
+        assert headers["X-Hermes-Session-Id"] == expected_header
+    if api_key:
+        assert headers["Authorization"] == f"Bearer {api_key}"
 
 
-@pytest.mark.asyncio
-async def test_ask_hermes_no_session_header_without_key(
-    monkeypatch, aiohttp_unused_port
-):
-    """Session continuity is gated on the API key; without it no session
-    header leaks even when a conversation id is supplied."""
-    received: dict[str, Any] = {}
-
-    async def handle(request: web.Request) -> web.Response:
-        received["headers"] = dict(request.headers)
-        return web.json_response(
-            {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
-        )
-
-    runner, base_url = await _run_hermes_stub(handle, aiohttp_unused_port)
-    monkeypatch.setenv("HERMES_API_URL", base_url)
-    monkeypatch.delenv("HERMES_API_KEY", raising=False)
-    try:
-        await ask_hermes("hey", session_id="stackchan-voice-abc123")
-    finally:
-        await runner.cleanup()
-
-    assert "X-Hermes-Session-Id" not in received["headers"]
-
-
-# ---- Phase F: voice-turn status-text feedback ------------------------
+# ---- voice-turn scaffolding (stub gateway + full pipeline) -----------
 
 
 class _StubESP32:
@@ -246,9 +201,29 @@ class _StubESP32:
         self.listen_calls.append((state, mode))
 
 
+class _StubChoreo:
+    """No-op stand-in for the gateway's Choreographer (see gateway.py)."""
+
+    def engage(self) -> None:
+        pass
+
+    def thinking(self) -> None:
+        pass
+
+    def tool_step(self, *, is_first: bool) -> None:
+        pass
+
+    def talk(self, duration_ms: int) -> None:
+        pass
+
+    def release(self, *, happy: bool = False) -> None:
+        pass
+
+
 class _StubGateway:
     def __init__(self) -> None:
         self.esp32 = _StubESP32()
+        self.choreo = _StubChoreo()
         self.voice_turn_active = False
         self.multiturn = MultiturnSession()
         self.multiturn_active = False
@@ -301,9 +276,7 @@ def _patch_voice_pipeline(
     import stackchan_mcp.stt as stt_mod
     import stackchan_mcp.tts.orchestrator as tts_orch
 
-    monkeypatch.setattr(
-        hermes_bridge, "_ogg_opus_to_pcm16k", lambda data: b"\x00\x00"
-    )
+    monkeypatch.setattr(hermes_bridge, "_ogg_opus_to_pcm16k", lambda data: b"\x00\x00")
 
     class _Registry:
         def get(self, name):
@@ -311,7 +284,23 @@ def _patch_voice_pipeline(
 
     monkeypatch.setattr(stt_mod, "get_registry", lambda: _Registry())
 
-    async def fake_generate_reply(text, *, force_hermes=False, session_id=None):
+    # The brain mint (native Sessions API) is a network call — stub it
+    # with a deterministic fake so every voice-turn test is hermetic.
+    session_seq = {"n": 0}
+
+    async def fake_create_session() -> str:
+        session_seq["n"] += 1
+        return f"api_test_{session_seq['n']}"
+
+    monkeypatch.setattr(hermes_bridge, "create_hermes_session", fake_create_session)
+
+    async def fake_generate_reply(
+        text, *, force_hermes=False, session_id=None, on_step=None
+    ):
+        # Exercise the real streaming callback so step labels get
+        # recorded like a live Hermes turn would produce them.
+        if on_step is not None:
+            await on_step("web_search", "lisbon weather")
         return reply, route
 
     monkeypatch.setattr(hermes_bridge, "generate_reply", fake_generate_reply)
@@ -325,6 +314,12 @@ def _patch_voice_pipeline(
     monkeypatch.setattr(control, "multiturn_enabled", multiturn.is_enabled)
 
     async def fake_send(arguments, *, gateway=None, **kw):
+        # Emulate the real orchestrator: the subtitle is shown only once
+        # the audio is loaded — fire the audio-ready callback before
+        # returning, exactly like synthesize_and_send does.
+        on_audio_ready = kw.get("on_audio_ready")
+        if on_audio_ready is not None:
+            await on_audio_ready()
         return {"frame_count": 1}
 
     monkeypatch.setattr(tts_orch, "synthesize_and_send", fake_send)
@@ -358,8 +353,6 @@ def _force_route_hint(monkeypatch, route: str) -> None:
     rule-based classifier says Hermes; pin it so the LED sequence is
     deterministic regardless of the local-LLM env.
     """
-    from stackchan_mcp import local_llm
-
     monkeypatch.setattr(local_llm, "is_enabled", lambda: True)
     monkeypatch.setattr(local_llm, "decide_route", lambda _t: route)
 
@@ -374,153 +367,156 @@ def _record_status_text(monkeypatch) -> list[str]:
     return seen
 
 
-@pytest.mark.asyncio
-async def test_voice_turn_status_text_sequence(monkeypatch):
-    monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
-    seen = _record_status_text(monkeypatch)
-    _patch_voice_pipeline(monkeypatch, transcript="good morning", reply="hey")
-    gateway = _StubGateway()
-    request = _make_voice_request(gateway)
+class _VoiceTurnRunner:
+    """Configured stub for one voice turn (see the ``voice_turn`` fixture)."""
 
-    response = await hermes_bridge.handle_voice_turn(request)
+    def __init__(self, gateway: _StubGateway, seen: list[str], rec: dict[str, list]):
+        self.gateway = gateway
+        self.seen = seen
+        self.rec = rec
+
+    async def run(self) -> web.Response:
+        return await hermes_bridge.handle_voice_turn(_make_voice_request(self.gateway))
+
+
+@pytest.fixture
+def voice_turn(monkeypatch):
+    """One-call voice-turn harness: hook token env + stubbed pipeline.
+
+    The factory wires the status/cosmetic recorders and stub brains/TTS
+    around a fresh _StubGateway and returns a ``runner`` whose attributes
+    expose the recorded calls; ``await runner.run()`` executes one turn.
+    Tests override stubs (``generate_reply=``, boom fakes) or gateway state
+    between the build call and run().
+    """
+    monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
+
+    def _make(
+        *,
+        transcript: str = "hey",
+        reply: str = "yes",
+        route: str = "hermes",
+        route_hint: str | None = None,
+        generate_reply=None,
+    ) -> _VoiceTurnRunner:
+        if route_hint is not None:
+            _force_route_hint(monkeypatch, route_hint)
+        gateway = _StubGateway()
+        seen = _record_status_text(monkeypatch)
+        rec = _record_device_cosmetics(monkeypatch)
+        _patch_voice_pipeline(
+            monkeypatch, transcript=transcript, reply=reply, route=route
+        )
+        if generate_reply is not None:
+            monkeypatch.setattr(hermes_bridge, "generate_reply", generate_reply)
+        return _VoiceTurnRunner(gateway, seen, rec)
+
+    return _make
+
+
+# ---- Phase F: voice-turn status-text feedback ------------------------
+
+
+async def test_voice_turn_status_text_sequence(monkeypatch, voice_turn):
+    runner = voice_turn(transcript="good morning", reply="hey")
+    response = await runner.run()
 
     assert response.status == 200
-    # I'm listening... (STT) → Thinking... (brain) → "" (clear in finally).
-    assert seen == [
+    # I'm listening... (STT) → Thinking... (brain) → live tool step
+    # (streamed hermes.tool.progress) → "" (clear in finally).
+    assert runner.seen == [
         control.STATUS_LISTENING,
         control.STATUS_THINKING,
+        hermes_bridge.tool_status_text("web_search", "lisbon weather"),
         control.STATUS_CLEAR,
     ]
-    assert gateway.voice_turn_active is False
-    assert gateway._interactions == 1
+    assert runner.gateway.voice_turn_active is False
+    assert runner.gateway._interactions == 1
 
 
-@pytest.mark.asyncio
-async def test_voice_turn_clears_status_on_empty_transcript(monkeypatch):
-    monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
-    seen = _record_status_text(monkeypatch)
-    _patch_voice_pipeline(monkeypatch, transcript="   ")
-    gateway = _StubGateway()
-    request = _make_voice_request(gateway)
-
-    response = await hermes_bridge.handle_voice_turn(request)
+async def test_voice_turn_clears_status_on_empty_transcript(monkeypatch, voice_turn):
+    runner = voice_turn(transcript="   ")
+    response = await runner.run()
 
     assert response.status == 200
     # Listening shown, then cleared in finally (no Thinking... — empty STT).
-    assert seen[0] == control.STATUS_LISTENING
-    assert seen[-1] == control.STATUS_CLEAR
-    assert control.STATUS_THINKING not in seen
-    assert gateway.voice_turn_active is False
+    assert runner.seen[0] == control.STATUS_LISTENING
+    assert runner.seen[-1] == control.STATUS_CLEAR
+    assert control.STATUS_THINKING not in runner.seen
+    assert runner.gateway.voice_turn_active is False
 
 
-@pytest.mark.asyncio
-async def test_voice_turn_clears_status_when_brain_fails(monkeypatch):
-    monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
-    seen = _record_status_text(monkeypatch)
-    _patch_voice_pipeline(monkeypatch, transcript="weather?")
-
-    async def boom(text, *, force_hermes=False, session_id=None):
+async def test_voice_turn_clears_status_when_brain_fails(monkeypatch, voice_turn):
+    async def boom(text, *, force_hermes=False, session_id=None, on_step=None):
         raise RuntimeError("hermes down")
 
-    monkeypatch.setattr(hermes_bridge, "generate_reply", boom)
-    gateway = _StubGateway()
-    request = _make_voice_request(gateway)
-
-    response = await hermes_bridge.handle_voice_turn(request)
+    runner = voice_turn(transcript="weather?", generate_reply=boom)
+    response = await runner.run()
 
     assert response.status == 502
-    assert seen[-1] == control.STATUS_CLEAR
-    assert gateway.voice_turn_active is False
+    assert runner.seen[-1] == control.STATUS_CLEAR
+    assert runner.gateway.voice_turn_active is False
 
 
 # ---- Phase F: subtitle / route badge / LED on the response phase ------
 
 
-@pytest.mark.asyncio
-async def test_voice_turn_hermes_route_sets_badge_and_led(monkeypatch):
-    monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
-    _record_status_text(monkeypatch)
-    rec = _record_device_cosmetics(monkeypatch)
-    _force_route_hint(monkeypatch, "hermes")
-    _patch_voice_pipeline(
-        monkeypatch, transcript="weather?", reply="sunny", route="hermes"
+async def test_voice_turn_hermes_route_sets_badge_and_led(monkeypatch, voice_turn):
+    runner = voice_turn(
+        transcript="weather?", reply="sunny", route="hermes", route_hint="hermes"
     )
-    gateway = _StubGateway()
-
-    response = await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    response = await runner.run()
 
     assert response.status == 200
     # Subtitle: reply shown during TTS, then cleared in finally.
-    assert rec["subtitle"] == ["sunny", ""]
+    assert runner.rec["subtitle"] == ["sunny", ""]
     # Badge: "H" set for Hermes, cleared in finally.
-    assert rec["badge"] == ["H", ""]
+    assert runner.rec["badge"] == ["H", ""]
     # LED: listening (STT) → hermes (pre-call thinking + post-call) → idle.
-    assert rec["led"] == ["listening", "hermes", "hermes", "idle"]
+    assert runner.rec["led"] == ["listening", "hermes", "hermes", "idle"]
 
 
-@pytest.mark.asyncio
-async def test_voice_turn_local_route_no_badge_no_led(monkeypatch):
-    monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
-    _record_status_text(monkeypatch)
-    rec = _record_device_cosmetics(monkeypatch)
-    _force_route_hint(monkeypatch, "local")
-    _patch_voice_pipeline(
-        monkeypatch, transcript="hey", reply="hey", route="local"
+async def test_voice_turn_local_route_no_badge_no_led(monkeypatch, voice_turn):
+    runner = voice_turn(
+        transcript="hey", reply="hey", route="local", route_hint="local"
     )
-    gateway = _StubGateway()
-
-    response = await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    response = await runner.run()
 
     assert response.status == 200
     # Subtitle still shown + cleared for local turns.
-    assert rec["subtitle"] == ["hey", ""]
+    assert runner.rec["subtitle"] == ["hey", ""]
     # No badge "H" for local — only the finally clear ("").
-    assert rec["badge"] == [""]
+    assert runner.rec["badge"] == [""]
     # Local keeps the listening colour (no hermes); finally restores idle.
-    assert rec["led"] == ["listening", "idle"]
+    assert runner.rec["led"] == ["listening", "idle"]
 
 
-@pytest.mark.asyncio
-async def test_voice_turn_clears_cosmetics_when_tts_fails(monkeypatch):
+async def test_voice_turn_clears_cosmetics_when_tts_fails(monkeypatch, voice_turn):
     import stackchan_mcp.tts.orchestrator as tts_orch
 
-    monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
-    _record_status_text(monkeypatch)
-    rec = _record_device_cosmetics(monkeypatch)
-    _patch_voice_pipeline(
-        monkeypatch, transcript="weather?", reply="sunny", route="hermes"
-    )
+    runner = voice_turn(transcript="weather?", reply="sunny", route="hermes")
 
     async def boom(arguments, *, gateway=None, **kw):
         raise RuntimeError("tts down")
 
     monkeypatch.setattr(tts_orch, "synthesize_and_send", boom)
-    gateway = _StubGateway()
-
-    response = await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    response = await runner.run()
 
     assert response.status == 502
     # Cosmetics were set before TTS, then the finally restores all three
     # (subtitle/badge cleared, LED back to the idle slot).
-    assert rec["subtitle"][-1] == ""
-    assert rec["badge"][-1] == ""
-    assert rec["led"][-1] == "idle"
+    assert runner.rec["subtitle"][-1] == ""
+    assert runner.rec["badge"][-1] == ""
+    assert runner.rec["led"][-1] == "idle"
 
 
 # ---- conversation log recording hook ---------------------------------
 
 
-@pytest.mark.asyncio
-async def test_voice_turn_records_conversation(monkeypatch):
-    monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
-    _record_status_text(monkeypatch)
+async def test_voice_turn_records_conversation(monkeypatch, voice_turn):
     control._CONVERSATION.clear()
-    _patch_voice_pipeline(
-        monkeypatch, transcript="good morning", reply="hey", route="local"
-    )
-    gateway = _StubGateway()
-
-    response = await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    runner = voice_turn(transcript="good morning", reply="hey", route="local")
+    response = await runner.run()
 
     assert response.status == 200
     turns = control.get_conversation()["turns"]
@@ -533,39 +529,58 @@ async def test_voice_turn_records_conversation(monkeypatch):
     control._CONVERSATION.clear()
 
 
-@pytest.mark.asyncio
-async def test_voice_turn_empty_transcript_not_recorded(monkeypatch):
-    monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
-    _record_status_text(monkeypatch)
+async def test_voice_turn_empty_transcript_not_recorded(monkeypatch, voice_turn):
     control._CONVERSATION.clear()
-    _patch_voice_pipeline(monkeypatch, transcript="   ")
-    gateway = _StubGateway()
+    runner = voice_turn(transcript="   ")
 
-    await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    await runner.run()
 
     # An empty transcript returns before the recording hook.
     assert control.get_conversation()["turns"] == []
     control._CONVERSATION.clear()
 
 
-@pytest.mark.asyncio
-async def test_voice_turn_tts_failure_not_recorded(monkeypatch):
+@pytest.mark.parametrize(
+    "label",
+    [
+        "[Som de futebol]",
+        "[MÚSICA]",
+        "[Som de fio]",
+        "[Applause]  [Music]",
+    ],
+)
+async def test_voice_turn_non_speech_labels_dropped(monkeypatch, voice_turn, label):
+    """Whisper's bracketed non-speech labels never reach Hermes (ambient
+    TV/room audio must not trigger a reply). Same drop path as silence."""
+    calls: list[str] = []
+
+    async def spy(text, *, force_hermes=False, session_id=None, on_step=None):
+        calls.append(text)
+        return "nope", "hermes"
+
+    runner = voice_turn(transcript=label, generate_reply=spy)
+    response = await runner.run()
+
+    assert response.status == 200
+    assert runner.seen[0] == control.STATUS_LISTENING
+    assert runner.seen[-1] == control.STATUS_CLEAR
+    assert control.STATUS_THINKING not in runner.seen
+    assert runner.gateway.voice_turn_active is False
+    # The transcript was dropped BEFORE the brain was consulted.
+    assert calls == []
+
+
+async def test_voice_turn_tts_failure_not_recorded(monkeypatch, voice_turn):
     import stackchan_mcp.tts.orchestrator as tts_orch
 
-    monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
-    _record_status_text(monkeypatch)
     control._CONVERSATION.clear()
-    _patch_voice_pipeline(
-        monkeypatch, transcript="weather?", reply="sunny", route="hermes"
-    )
+    runner = voice_turn(transcript="weather?", reply="sunny", route="hermes")
 
     async def boom(arguments, *, gateway=None, **kw):
         raise RuntimeError("tts down")
 
     monkeypatch.setattr(tts_orch, "synthesize_and_send", boom)
-    gateway = _StubGateway()
-
-    response = await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    response = await runner.run()
 
     assert response.status == 502
     # A TTS failure returns before the recording hook.
@@ -576,10 +591,17 @@ async def test_voice_turn_tts_failure_not_recorded(monkeypatch):
 # ---- Hermes-pin routing toggle (force_hermes) ------------------------
 
 
-@pytest.mark.asyncio
-async def test_generate_reply_force_hermes_bypasses_local(monkeypatch):
-    from stackchan_mcp import local_llm
-
+@pytest.mark.parametrize(
+    ("force", "expected"),
+    [
+        # Default: the rule-based local fast-path answers.
+        (False, ("local", local_llm.ROUTE_LOCAL)),
+        # Pinned: the local fast-path is skipped entirely.
+        (True, ("hermes", local_llm.ROUTE_HERMES)),
+    ],
+    ids=["default-keeps-local", "force-hermes-bypasses-local"],
+)
+async def test_generate_reply_routing_by_force_flag(monkeypatch, force, expected):
     monkeypatch.setattr(local_llm, "is_enabled", lambda: True)
     monkeypatch.setattr(local_llm, "decide_route", lambda _t: local_llm.ROUTE_LOCAL)
     called = {"local": False}
@@ -588,62 +610,44 @@ async def test_generate_reply_force_hermes_bypasses_local(monkeypatch):
         called["local"] = True
         return "local"
 
-    async def fake_hermes(text, *, session_id=None):
+    async def fake_hermes(text, *, session_id=None, on_step=None):
         return "hermes"
 
     monkeypatch.setattr(local_llm, "ask_local", fake_local)
-    monkeypatch.setattr(hermes_bridge, "ask_hermes", fake_hermes)
+    monkeypatch.setattr(hermes_bridge, "ask_hermes_stream", fake_hermes)
 
-    reply, route = await hermes_bridge.generate_reply("short", force_hermes=True)
+    reply, route = await hermes_bridge.generate_reply("short", force_hermes=force)
 
-    assert (reply, route) == ("hermes", local_llm.ROUTE_HERMES)
-    assert called["local"] is False  # the local fast-path was skipped
-
-
-@pytest.mark.asyncio
-async def test_generate_reply_default_keeps_local(monkeypatch):
-    from stackchan_mcp import local_llm
-
-    monkeypatch.setattr(local_llm, "is_enabled", lambda: True)
-    monkeypatch.setattr(local_llm, "decide_route", lambda _t: local_llm.ROUTE_LOCAL)
-
-    async def fake_local(text, *, system_prompt):
-        return "local"
-
-    monkeypatch.setattr(local_llm, "ask_local", fake_local)
-
-    reply, route = await hermes_bridge.generate_reply("short")
-
-    assert (reply, route) == ("local", local_llm.ROUTE_LOCAL)
+    assert (reply, route) == expected
+    if force:
+        assert called["local"] is False  # the local fast-path was skipped
 
 
-@pytest.mark.asyncio
-async def test_voice_turn_force_hermes_lights_hermes_and_passes_flag(monkeypatch):
-    monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
-    _record_status_text(monkeypatch)
-    rec = _record_device_cosmetics(monkeypatch)
-    # The rule-based classifier would pick LOCAL, but the pin forces Hermes.
-    _force_route_hint(monkeypatch, "local")
-    _patch_voice_pipeline(
-        monkeypatch, transcript="hey", reply="hello", route="hermes"
-    )
-    monkeypatch.setattr(control, "routing_force_hermes", lambda: True)
+async def test_voice_turn_force_hermes_lights_hermes_and_passes_flag(
+    monkeypatch, voice_turn
+):
     seen: dict[str, bool] = {}
 
-    async def fake_gr(text, *, force_hermes=False, session_id=None):
+    async def fake_gr(text, *, force_hermes=False, session_id=None, on_step=None):
         seen["force_hermes"] = force_hermes
         return "hello", "hermes"
 
-    monkeypatch.setattr(hermes_bridge, "generate_reply", fake_gr)
-    gateway = _StubGateway()
-
-    response = await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    # The rule-based classifier would pick LOCAL, but the pin forces Hermes.
+    runner = voice_turn(
+        transcript="hey",
+        reply="hello",
+        route="hermes",
+        route_hint="local",
+        generate_reply=fake_gr,
+    )
+    monkeypatch.setattr(control, "routing_force_hermes", lambda: True)
+    response = await runner.run()
 
     assert response.status == 200
     # The pin is threaded into generate_reply.
     assert seen["force_hermes"] is True
     # LED hint lights Hermes pre-call despite decide_route == local.
-    assert rec["led"] == ["listening", "hermes", "hermes", "idle"]
+    assert runner.rec["led"] == ["listening", "hermes", "hermes", "idle"]
 
 
 # ---- multi-turn continuation (Phase 1) -----------------------------------
@@ -656,269 +660,408 @@ def _enable_multiturn(monkeypatch, *, muted: bool = False) -> None:
     monkeypatch.setattr(control, "is_muted", lambda: muted)
 
 
-def _run_one_turn(monkeypatch, gateway, *, transcript="hey", reply="yes", route="hermes"):
-    monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
-    _record_status_text(monkeypatch)
-    _record_device_cosmetics(monkeypatch)
-    _patch_voice_pipeline(monkeypatch, transcript=transcript, reply=reply, route=route)
-
-
-@pytest.mark.asyncio
-async def test_multiturn_reopens_listen_on_hermes_question(monkeypatch):
-    _run_one_turn(monkeypatch, None, reply="how have you been?", route="hermes")
+async def test_multiturn_reopens_listen_on_hermes_question(monkeypatch, voice_turn):
+    runner = voice_turn(transcript="hey", reply="how have you been?", route="hermes")
     _enable_multiturn(monkeypatch)
-    gateway = _StubGateway()
-
-    response = await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    response = await runner.run()
 
     assert response.status == 200
     # A continuation listen was fired, the counter advanced, and the gap
     # flag stays True so the heartbeat is suppressed until the answer.
-    assert gateway.esp32.listen_calls == [("start", "manual")]
-    assert gateway.multiturn.turn_count == 1
-    assert gateway.multiturn_active is True
+    assert runner.gateway.esp32.listen_calls == [("start", "manual")]
+    assert runner.gateway.multiturn.turn_count == 1
+    assert runner.gateway.multiturn_active is True
     body = json.loads(response.body)
     assert body["multiturn"] is True
 
 
-@pytest.mark.asyncio
-async def test_multiturn_off_by_default(monkeypatch):
+async def test_multiturn_off_by_default(monkeypatch, voice_turn):
     # No STACKCHAN_MULTITURN env: feature disabled even on a question.
     monkeypatch.delenv("STACKCHAN_MULTITURN", raising=False)
-    _run_one_turn(monkeypatch, None, reply="how are you?", route="hermes")
-    gateway = _StubGateway()
-
-    response = await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    runner = voice_turn(transcript="hey", reply="how are you?", route="hermes")
+    response = await runner.run()
 
     assert response.status == 200
-    assert gateway.esp32.listen_calls == []
-    assert gateway.multiturn_active is False
+    assert runner.gateway.esp32.listen_calls == []
+    assert runner.gateway.multiturn_active is False
     assert json.loads(response.body)["multiturn"] is False
 
 
-@pytest.mark.asyncio
-async def test_multiturn_skips_local_route(monkeypatch):
-    _run_one_turn(monkeypatch, None, reply="how are you?", route="local")
-    _enable_multiturn(monkeypatch)
-    gateway = _StubGateway()
+@pytest.mark.parametrize(
+    ("route", "reply", "muted", "connected"),
+    [
+        ("local", "how are you?", False, True),  # brain chose the local route
+        ("hermes", "I see.", False, True),  # Hermes answered, no question
+        ("hermes", "how are you?", True, True),  # device muted
+        ("hermes", "how are you?", False, False),  # device disconnected
+    ],
+    ids=["local-route", "non-question", "muted", "disconnected"],
+)
+async def test_multiturn_skips_relisten(
+    monkeypatch, voice_turn, route, reply, muted, connected
+):
+    """No hands-free re-listen fires for any non-continuable turn."""
+    runner = voice_turn(transcript="hey", reply=reply, route=route)
+    _enable_multiturn(monkeypatch, muted=muted)
+    runner.gateway.esp32.device_connected = connected
 
-    await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    await runner.run()
 
-    assert gateway.esp32.listen_calls == []
-    assert gateway.multiturn_active is False
-
-
-@pytest.mark.asyncio
-async def test_multiturn_skips_non_question(monkeypatch):
-    _run_one_turn(monkeypatch, None, reply="I see.", route="hermes")
-    _enable_multiturn(monkeypatch)
-    gateway = _StubGateway()
-
-    await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
-
-    assert gateway.esp32.listen_calls == []
+    assert runner.gateway.esp32.listen_calls == []
+    assert runner.gateway.multiturn_active is False
 
 
-@pytest.mark.asyncio
-async def test_multiturn_stops_at_ceiling(monkeypatch):
-    _run_one_turn(monkeypatch, None, reply="keep going?", route="hermes")
+async def test_multiturn_stops_at_ceiling(monkeypatch, voice_turn):
+    runner = voice_turn(transcript="hey", reply="keep going?", route="hermes")
     _enable_multiturn(monkeypatch)
     monkeypatch.setenv("MAX_MULTITURN_TURNS", "2")
-    gateway = _StubGateway()
     # Mid-conversation at the ceiling: a *fresh* gap (recent activity) so
     # the entry stale-reset does not fire and the ceiling check applies.
     monkeypatch.setattr(hermes_bridge.time, "monotonic", lambda: 500.0)
-    gateway.multiturn.turn_count = 2  # already at the ceiling
-    gateway.multiturn.last_activity = 500.0
+    runner.gateway.multiturn.turn_count = 2  # already at the ceiling
+    runner.gateway.multiturn.last_activity = 500.0
 
-    await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    await runner.run()
 
-    assert gateway.esp32.listen_calls == []
+    assert runner.gateway.esp32.listen_calls == []
     # Reaching the ceiling ends the conversation: the counter resets.
-    assert gateway.multiturn.turn_count == 0
+    assert runner.gateway.multiturn.turn_count == 0
 
 
-@pytest.mark.asyncio
-async def test_multiturn_ceiling_on_question_shows_tap_hint(monkeypatch):
+async def test_multiturn_ceiling_on_question_shows_tap_hint(monkeypatch, voice_turn):
     # Phase 3 UX: when we stop only because the turn ceiling was hit while
     # Hermes still had an open question, leave a "tap to continue" subtitle
     # instead of blanking the display.
-    monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
-    _record_status_text(monkeypatch)
-    rec = _record_device_cosmetics(monkeypatch)
-    _patch_voice_pipeline(
-        monkeypatch, transcript="hey", reply="keep going?", route="hermes"
-    )
+    runner = voice_turn(transcript="hey", reply="keep going?", route="hermes")
     _enable_multiturn(monkeypatch)
     monkeypatch.setenv("MAX_MULTITURN_TURNS", "2")
     monkeypatch.setattr(hermes_bridge.time, "monotonic", lambda: 500.0)
-    gateway = _StubGateway()
-    gateway.multiturn.turn_count = 2  # already at the ceiling
-    gateway.multiturn.last_activity = 500.0
+    runner.gateway.multiturn.turn_count = 2  # already at the ceiling
+    runner.gateway.multiturn.last_activity = 500.0
 
-    await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    await runner.run()
 
-    assert gateway.esp32.listen_calls == []  # no hands-free re-listen
-    assert gateway.multiturn_active is False
+    assert runner.gateway.esp32.listen_calls == []  # no hands-free re-listen
+    assert runner.gateway.multiturn_active is False
     # The last subtitle written is the hint (after the reply subtitle), and
     # the one-shot flag is consumed.
-    assert rec["subtitle"][-1] == multiturn.TAP_TO_CONTINUE_HINT
-    assert gateway.multiturn_prompt_pending is False
+    assert runner.rec["subtitle"][-1] == multiturn.TAP_TO_CONTINUE_HINT
+    assert runner.gateway.multiturn_prompt_pending is False
 
 
-@pytest.mark.asyncio
-async def test_multiturn_no_hint_on_normal_end(monkeypatch):
+async def test_multiturn_no_hint_on_normal_end(monkeypatch, voice_turn):
     # A non-question end clears the subtitle as before — the hint is only
     # for the ceiling-on-question case, not every conversation close.
-    monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
-    _record_status_text(monkeypatch)
-    rec = _record_device_cosmetics(monkeypatch)
-    _patch_voice_pipeline(
-        monkeypatch, transcript="hey", reply="right.", route="hermes"
-    )
+    runner = voice_turn(transcript="hey", reply="right.", route="hermes")
     _enable_multiturn(monkeypatch)
-    gateway = _StubGateway()
 
-    await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    await runner.run()
 
-    assert gateway.multiturn_prompt_pending is False
-    assert rec["subtitle"][-1] == ""
-
-
-@pytest.mark.asyncio
-async def test_multiturn_skips_when_muted(monkeypatch):
-    _run_one_turn(monkeypatch, None, reply="how are you?", route="hermes")
-    _enable_multiturn(monkeypatch, muted=True)
-    gateway = _StubGateway()
-
-    await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
-
-    assert gateway.esp32.listen_calls == []
+    assert runner.gateway.multiturn_prompt_pending is False
+    assert runner.rec["subtitle"][-1] == ""
 
 
-@pytest.mark.asyncio
-async def test_multiturn_skips_when_disconnected(monkeypatch):
-    _run_one_turn(monkeypatch, None, reply="how are you?", route="hermes")
+async def test_multiturn_empty_transcript_resets_counter(monkeypatch, voice_turn):
+    runner = voice_turn(transcript="   ", reply="ignored", route="hermes")
     _enable_multiturn(monkeypatch)
-    gateway = _StubGateway()
-    gateway.esp32.device_connected = False
+    runner.gateway.multiturn.turn_count = 2  # mid-conversation
 
-    await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
-
-    assert gateway.esp32.listen_calls == []
-
-
-@pytest.mark.asyncio
-async def test_multiturn_empty_transcript_resets_counter(monkeypatch):
-    _run_one_turn(monkeypatch, None, transcript="   ", reply="ignored", route="hermes")
-    _enable_multiturn(monkeypatch)
-    gateway = _StubGateway()
-    gateway.multiturn.turn_count = 2  # mid-conversation
-
-    response = await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    response = await runner.run()
 
     # Silence ends the conversation: no re-listen, counter cleared.
     assert response.status == 200
     assert json.loads(response.body)["ok"] is False
-    assert gateway.esp32.listen_calls == []
-    assert gateway.multiturn.turn_count == 0
+    assert runner.gateway.esp32.listen_calls == []
+    assert runner.gateway.multiturn.turn_count == 0
 
 
-@pytest.mark.asyncio
-async def test_voice_turn_threads_rotating_conversation_id(monkeypatch):
-    """Phase 2: the voice turn threads a per-conversation Hermes id into
-    the brain call — reused within the context window, rotated past it."""
-    monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
-    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)  # default base
+async def test_voice_turn_threads_rotating_conversation_id(monkeypatch, voice_turn):
+    """Phase 2: the voice turn threads a per-conversation Hermes session id
+    into the brain call — reused within the context window, rotated past it."""
     monkeypatch.delenv("HERMES_SESSION_WINDOW_S", raising=False)  # default 180
-    _record_status_text(monkeypatch)
-    _record_device_cosmetics(monkeypatch)
-    _patch_voice_pipeline(monkeypatch, transcript="hey", reply="yes", route="hermes")
-
     seen: list[str | None] = []
 
-    async def capture_gr(text, *, force_hermes=False, session_id=None):
+    async def capture_gr(text, *, force_hermes=False, session_id=None, on_step=None):
         seen.append(session_id)
         return "yes", "hermes"
 
-    monkeypatch.setattr(hermes_bridge, "generate_reply", capture_gr)
-    gateway = _StubGateway()
-
+    runner = voice_turn(
+        transcript="hey", reply="yes", route="hermes", generate_reply=capture_gr
+    )
     # Two turns 10 s apart share one conversation id (< 180 s window)...
     monkeypatch.setattr(hermes_bridge.time, "monotonic", lambda: 1000.0)
-    await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    await runner.run()
     monkeypatch.setattr(hermes_bridge.time, "monotonic", lambda: 1010.0)
-    await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    await runner.run()
     # ...then a long gap starts a fresh conversation (new id).
     monkeypatch.setattr(hermes_bridge.time, "monotonic", lambda: 5000.0)
-    await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    await runner.run()
 
-    assert all(s and s.startswith("stackchan-voice-") for s in seen)
+    assert all(s and s.startswith("api_test_") for s in seen)
     assert seen[0] == seen[1]  # same conversation, context retained
     assert seen[2] != seen[0]  # rotated after the window
 
 
-@pytest.mark.asyncio
-async def test_voice_turn_window_zero_uses_fixed_session_id(monkeypatch):
-    """HERMES_SESSION_WINDOW_S=0 disables rotation — every turn carries
-    the fixed HERMES_SESSION_ID, exactly as before Phase 2."""
-    monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
-    monkeypatch.setenv("HERMES_SESSION_ID", "stackchan-voice")
+async def test_voice_turn_window_zero_uses_one_persistent_session(
+    monkeypatch, voice_turn
+):
+    """HERMES_SESSION_WINDOW_S=0 disables rotation — one session is created
+    on first use and every later turn reuses it (persistent conversation)."""
     monkeypatch.setenv("HERMES_SESSION_WINDOW_S", "0")
-    _record_status_text(monkeypatch)
-    _record_device_cosmetics(monkeypatch)
-    _patch_voice_pipeline(monkeypatch, transcript="hey", reply="yes", route="hermes")
-
     seen: list[str | None] = []
 
-    async def capture_gr(text, *, force_hermes=False, session_id=None):
+    async def capture_gr(text, *, force_hermes=False, session_id=None, on_step=None):
         seen.append(session_id)
         return "yes", "hermes"
 
-    monkeypatch.setattr(hermes_bridge, "generate_reply", capture_gr)
-    gateway = _StubGateway()
+    runner = voice_turn(
+        transcript="hey", reply="yes", route="hermes", generate_reply=capture_gr
+    )
 
     monkeypatch.setattr(hermes_bridge.time, "monotonic", lambda: 1000.0)
-    await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    await runner.run()
     monkeypatch.setattr(hermes_bridge.time, "monotonic", lambda: 9000.0)
-    await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    await runner.run()
 
-    # No rotation: the base id is used verbatim on every turn.
-    assert seen == ["stackchan-voice", "stackchan-voice"]
+    # No rotation: one minted session reused verbatim on every turn.
+    assert seen == ["api_test_1", "api_test_1"]
 
 
-@pytest.mark.asyncio
-async def test_multiturn_stale_gap_resets_at_turn_entry(monkeypatch):
-    _run_one_turn(monkeypatch, None, reply="right.", route="hermes")
+async def test_multiturn_stale_gap_resets_at_turn_entry(monkeypatch, voice_turn):
+    runner = voice_turn(transcript="hey", reply="right.", route="hermes")
     _enable_multiturn(monkeypatch)
     monkeypatch.setenv("MULTITURN_SESSION_TIMEOUT_S", "60")
-    gateway = _StubGateway()
     # An old, abandoned gap: counter set, activity far in the past.
-    gateway.multiturn.turn_count = 3
-    gateway.multiturn.last_activity = 1.0
+    runner.gateway.multiturn.turn_count = 3
+    runner.gateway.multiturn.last_activity = 1.0
     monkeypatch.setattr(hermes_bridge.time, "monotonic", lambda: 1000.0)
 
-    await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    await runner.run()
 
     # The stale gap was reset at entry; this fresh turn (no question)
     # leaves the counter at 0.
-    assert gateway.multiturn.turn_count == 0
-    assert gateway.multiturn_active is False
+    assert runner.gateway.multiturn.turn_count == 0
+    assert runner.gateway.multiturn_active is False
 
 
-@pytest.mark.asyncio
-async def test_multiturn_continuation_skips_display_clear(monkeypatch):
+async def test_multiturn_continuation_skips_display_clear(monkeypatch, voice_turn):
     # When a turn re-opens listening, the finally must NOT clear the
     # status text (on_listen_started owns the listening display now).
-    monkeypatch.setenv("STACKCHAN_AUDIO_HOOK_TOKEN", "turn-token")
-    seen = _record_status_text(monkeypatch)
-    _record_device_cosmetics(monkeypatch)
-    _patch_voice_pipeline(monkeypatch, transcript="hey", reply="how are you?", route="hermes")
+    runner = voice_turn(transcript="hey", reply="how are you?", route="hermes")
     _enable_multiturn(monkeypatch)
-    gateway = _StubGateway()
 
-    await hermes_bridge.handle_voice_turn(_make_voice_request(gateway))
+    await runner.run()
 
-    # I'm listening... → Thinking..., but NO trailing clear (would blank the re-listen).
-    assert control.STATUS_CLEAR not in seen
-    assert seen == [control.STATUS_LISTENING, control.STATUS_THINKING]
+    # I'm listening... → Thinking... → live tool step, but NO trailing
+    # clear (would blank the re-listen).
+    assert control.STATUS_CLEAR not in runner.seen
+    assert runner.seen == [
+        control.STATUS_LISTENING,
+        control.STATUS_THINKING,
+        hermes_bridge.tool_status_text("web_search", "lisbon weather"),
+    ]
+
+
+# ---- Phase F (steps): streaming tool progress on the LCD ----------------
+
+
+@pytest.mark.parametrize(
+    ("tool", "label", "expected"),
+    [
+        # Known tools map to terse labels.
+        ("web_search", "", "Searching..."),
+        ("write_note", "", "Saving note..."),
+        ("take_photo", "", "Taking photo..."),
+        # Unknown tools fall back to a generic working label.
+        ("some_new_tool", "", "Working..."),
+        # web_search shows the query itself (truncated to the LCD budget).
+        ("web_search", "lisbon", "Searching: lisbon"),
+        (
+            "web_search",
+            "a very long query that would overflow the one-line LCD label",
+            "Searching: a very long query that would...",
+        ),
+        # Non-web_search tools ignore the label.
+        ("write_note", "whatever label", "Saving note..."),
+    ],
+    ids=[
+        "web-search-generic",
+        "write-note",
+        "take-photo",
+        "unknown-tool",
+        "web-search-query",
+        "web-search-query-truncated",
+        "non-search-label-ignored",
+    ],
+)
+def test_tool_status_text_mapping(tool, label, expected):
+    assert tool_status_text(tool, label) == expected
+
+
+async def _run_hermes_sse_stub(
+    handler, aiohttp_unused_port, session_id: str = "sess-test"
+):
+    """Run ``handler`` behind the native session-chat/stream SSE route."""
+    app = web.Application()
+    app.router.add_route("POST", f"/api/sessions/{session_id}/chat/stream", handler)
+    port = aiohttp_unused_port()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    return runner, f"http://127.0.0.1:{port}"
+
+
+def _sse_body(*, tool: str | None = None, label: str = "", reply: str = "ok") -> str:
+    """Build a realistic native Hermes session-stream SSE response."""
+    lines: list[str] = []
+    if tool is not None:
+        lines.append("event: tool.started")
+        lines.append(
+            "data: "
+            + json.dumps(
+                {
+                    "message_id": "msg_test",
+                    "tool_name": tool,
+                    "preview": label or None,
+                    "args": {"query": label} if label else None,
+                }
+            )
+        )
+        lines.append("")
+        lines.append("event: tool.completed")
+        lines.append("data: " + json.dumps({"tool_name": tool, "preview": None}))
+        lines.append("")
+    lines.append("event: assistant.delta")
+    lines.append("data: " + json.dumps({"delta": reply}))
+    lines.append("")
+    lines.append("event: assistant.completed")
+    lines.append(
+        "data: " + json.dumps({"content": reply, "completed": True, "partial": False})
+    )
+    lines.append("")
+    lines.append("event: run.completed")
+    lines.append("data: " + json.dumps({"completed": True, "messages": []}))
+    lines.append("")
+    lines.append("event: done")
+    lines.append("data: " + json.dumps({}))
+    return "\n".join(lines)
+
+
+async def test_ask_hermes_stream_surfaces_tool_steps(monkeypatch, aiohttp_unused_port):
+    """tool.started SSE events reach on_step; reply is assembled."""
+    received: dict[str, Any] = {}
+    steps: list[tuple[str, str]] = []
+
+    async def handle(request: web.Request) -> web.Response:
+        received["payload"] = await request.json()
+        return web.Response(
+            text=_sse_body(tool="web_search", label="lisbon weather", reply=" sunny"),
+            content_type="text/event-stream",
+        )
+
+    runner, base_url = await _run_hermes_sse_stub(handle, aiohttp_unused_port)
+    monkeypatch.setenv("HERMES_API_URL", base_url)
+    monkeypatch.delenv("HERMES_API_KEY", raising=False)
+
+    async def on_step(tool: str, label: str = "") -> None:
+        steps.append((tool, label))
+
+    try:
+        reply = await ask_hermes_stream(
+            "weather?", session_id="sess-test", on_step=on_step
+        )
+    finally:
+        await runner.cleanup()
+
+    assert reply == "sunny"
+    assert steps == [("web_search", "lisbon weather")]
+    # Native session-chat request: input + instructions (no messages[]).
+    assert received["payload"]["input"] == "weather?"
+    instructions = received["payload"]["instructions"]
+    assert instructions.startswith(
+        os.getenv("HERMES_VOICE_SYSTEM_PROMPT", DEFAULT_VOICE_SYSTEM_PROMPT)
+    )
+    assert HERMES_VOICE_TOOLS_LINE in instructions
+
+
+async def test_ask_hermes_stream_empty_reply_raises(monkeypatch, aiohttp_unused_port):
+    """A stream with no content deltas surfaces as RuntimeError."""
+
+    # _sse_body always includes content; serve only terminal events to
+    # force an empty reply.
+    async def handle_empty(request: web.Request) -> web.Response:
+        body = (
+            "event: run.completed\n"
+            'data: {"completed": true, "messages": []}\n\n'
+            "event: done\n"
+            "data: {}\n"
+        )
+        return web.Response(text=body, content_type="text/event-stream")
+
+    runner, base_url = await _run_hermes_sse_stub(handle_empty, aiohttp_unused_port)
+    monkeypatch.setenv("HERMES_API_URL", base_url)
+    monkeypatch.delenv("HERMES_API_KEY", raising=False)
+
+    try:
+        with pytest.raises(RuntimeError, match="empty reply"):
+            await ask_hermes_stream("hey", session_id="sess-test")
+    finally:
+        await runner.cleanup()
+
+
+# ---- native session mint (create_hermes_session) -------------------------
+
+
+async def _run_hermes_json_stub(handler, aiohttp_unused_port):
+    """Run ``handler`` behind the native POST /api/sessions route."""
+    app = web.Application()
+    app.router.add_route("POST", "/api/sessions", handler)
+    port = aiohttp_unused_port()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    return runner, f"http://127.0.0.1:{port}"
+
+
+async def test_create_hermes_session_accepts_201_and_returns_id(
+    monkeypatch, aiohttp_unused_port
+):
+    """POST /api/sessions answers 201 Created; post_json must accept 2xx
+    and create_hermes_session must return the nested session.id."""
+
+    async def handle(request: web.Request) -> web.Response:
+        return web.json_response(
+            {"object": "hermes.session", "session": {"id": "api_123"}}, status=201
+        )
+
+    runner, base_url = await _run_hermes_json_stub(handle, aiohttp_unused_port)
+    monkeypatch.setenv("HERMES_API_URL", base_url)
+    monkeypatch.delenv("HERMES_API_KEY", raising=False)
+
+    try:
+        session_id = await hermes_bridge.create_hermes_session()
+    finally:
+        await runner.cleanup()
+
+    assert session_id == "api_123"
+
+
+async def test_create_hermes_session_missing_id_raises(
+    monkeypatch, aiohttp_unused_port
+):
+    """A 2xx body without session.id is malformed → RuntimeError."""
+
+    async def handle(request: web.Request) -> web.Response:
+        return web.json_response({"object": "oops"}, status=201)
+
+    runner, base_url = await _run_hermes_json_stub(handle, aiohttp_unused_port)
+    monkeypatch.setenv("HERMES_API_URL", base_url)
+    monkeypatch.delenv("HERMES_API_KEY", raising=False)
+
+    try:
+        with pytest.raises(RuntimeError, match="missing session.id"):
+            await hermes_bridge.create_hermes_session()
+    finally:
+        await runner.cleanup()

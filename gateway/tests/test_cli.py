@@ -11,6 +11,7 @@ import asyncio
 import os
 import signal
 import socket
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -45,6 +46,8 @@ _PREFLIGHT_ENV_VARS = (
     "MCP_HTTP_ALLOWED_HOSTS",
 )
 
+_CheckPort = Callable[[str, int], tuple[bool, str | None]]
+
 
 def _isolate_preflight_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -64,6 +67,28 @@ def _isolate_preflight_env(
         monkeypatch.delenv(var, raising=False)
 
 
+def _preflight_out(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    env: dict[str, str] | None = None,
+    check: _CheckPort | None = None,
+) -> tuple[int, str]:
+    """Run ``_run_preflight`` against an isolated env; return (code, stdout).
+
+    Every preflight test shares the same scaffolding: isolate the env,
+    apply the case-specific env overrides, stub ``_check_port`` (free
+    by default), run, and capture stdout.
+    """
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    for key, value in (env or {}).items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(
+        cli, "_check_port", check or (lambda host, port: (True, None))
+    )
+    return _run_preflight(), capsys.readouterr().out
+
+
 def _fake_lock_info() -> dict[str, object]:
     return {
         "owner_id": "test-owner",
@@ -73,52 +98,45 @@ def _fake_lock_info() -> dict[str, object]:
     }
 
 
-def test_arg_parser_help_long_flag(capsys: pytest.CaptureFixture[str]) -> None:
-    parser = _build_arg_parser()
-    with pytest.raises(SystemExit) as exc:
-        parser.parse_args(["--help"])
-    assert exc.value.code == 0
-    captured = capsys.readouterr()
-    out = captured.out
-    # Help text should mention prog name, the headline env vars, and a
-    # pointer to the in-tree READMEs so end users know where to look next.
-    assert "stackchan-mcp" in out
-    assert "STACKCHAN_TOKEN" in out
-    assert "VISION_URL" in out
-    assert "WS_PORT" in out
-    assert "README" in out
+# --- --help / --version flags ----------------------------------------------
 
 
-def test_arg_parser_help_short_flag() -> None:
-    parser = _build_arg_parser()
-    with pytest.raises(SystemExit) as exc:
-        parser.parse_args(["-h"])
-    assert exc.value.code == 0
-
-
-def test_arg_parser_version_long_flag(
+@pytest.mark.parametrize(
+    "flag, expect_version, expected_in",
+    [
+        # Help text should mention prog name, the headline env vars, and
+        # a pointer to the in-tree READMEs so end users know where to
+        # look next.
+        (
+            "--help",
+            False,
+            ["stackchan-mcp", "STACKCHAN_TOKEN", "VISION_URL", "WS_PORT", "README"],
+        ),
+        ("-h", False, []),
+        # argparse writes --version output to stdout on Python 3.4+.
+        ("--version", True, []),
+        ("-V", True, []),
+    ],
+    ids=["long_help", "short_help", "long_version", "short_version"],
+)
+def test_arg_parser_help_and_version_flags(
     capsys: pytest.CaptureFixture[str],
+    flag: str,
+    expect_version: bool,
+    expected_in: list[str],
 ) -> None:
     parser = _build_arg_parser()
     with pytest.raises(SystemExit) as exc:
-        parser.parse_args(["--version"])
+        parser.parse_args([flag])
     assert exc.value.code == 0
     captured = capsys.readouterr()
-    # argparse writes --version output to stdout on Python 3.4+.
-    combined = captured.out + captured.err
-    assert f"stackchan-mcp {__version__}" in combined
-
-
-def test_arg_parser_version_short_flag(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    parser = _build_arg_parser()
-    with pytest.raises(SystemExit) as exc:
-        parser.parse_args(["-V"])
-    assert exc.value.code == 0
-    captured = capsys.readouterr()
-    combined = captured.out + captured.err
-    assert f"stackchan-mcp {__version__}" in combined
+    if expect_version:
+        combined = captured.out + captured.err
+        assert f"stackchan-mcp {__version__}" in combined
+    else:
+        assert "stackchan-mcp" in captured.out
+        for text in expected_in:
+            assert text in captured.out
 
 
 def test_main_help_exits_before_side_effects(
@@ -153,51 +171,38 @@ def test_version_resolves_from_installed_metadata() -> None:
 # --- --check flag tests -----------------------------------------------------
 
 
-def test_arg_parser_check_flag_is_registered() -> None:
-    parser = _build_arg_parser()
-    args = parser.parse_args(["--check"])
-    assert args.check is True
+@pytest.mark.parametrize(
+    "argv, attr, expected",
+    [
+        (["--check"], "check", True),
+        (["--no-mdns"], "no_mdns", True),
+    ],
+)
+def test_arg_parser_flag_is_registered(
+    argv: list[str], attr: str, expected: bool
+) -> None:
+    args = _build_arg_parser().parse_args(argv)
+    assert getattr(args, attr) is expected
 
 
-def test_arg_parser_check_defaults_to_false() -> None:
-    parser = _build_arg_parser()
-    args = parser.parse_args([])
-    assert args.check is False
+@pytest.mark.parametrize(
+    "attr, expected",
+    [("check", False), ("no_mdns", False)],
+)
+def test_arg_parser_flag_defaults_to_false(attr: str, expected: bool) -> None:
+    args = _build_arg_parser().parse_args([])
+    assert getattr(args, attr) is expected
 
 
-def test_arg_parser_no_mdns_flag_is_registered() -> None:
-    parser = _build_arg_parser()
-    args = parser.parse_args(["--no-mdns"])
-    assert args.no_mdns is True
-
-
-def test_arg_parser_no_mdns_defaults_to_false() -> None:
-    parser = _build_arg_parser()
-    args = parser.parse_args([])
-    assert args.no_mdns is False
-
-
-def test_main_default_advertises_mdns(monkeypatch: pytest.MonkeyPatch) -> None:
-    from stackchan_mcp import ownership
-
-    called: dict[str, bool] = {}
-
-    async def fake_run(*, advertise_mdns: bool = True) -> None:
-        called["advertise_mdns"] = advertise_mdns
-
-    monkeypatch.setattr(cli, "_prepare_stdio_startup", _fake_lock_info)
-    monkeypatch.setattr(cli, "_load_dotenv", lambda: None)
-    monkeypatch.setattr(cli, "_ensure_libopus_findable", lambda: None)
-    monkeypatch.setattr(cli, "_run", fake_run)
-    monkeypatch.setattr(ownership, "release_lock_if_owner", lambda info: True)
-
-    main([])
-
-    assert called == {"advertise_mdns": True}
-
-
-def test_main_no_mdns_disables_advertisement(
+@pytest.mark.parametrize(
+    "argv, expected_mdns",
+    [([], True), (["--no-mdns"], False)],
+    ids=["default_advertises_mdns", "no_mdns_disables_advertisement"],
+)
+def test_main_mdns_advertisement_flag(
     monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    expected_mdns: bool,
 ) -> None:
     from stackchan_mcp import ownership
 
@@ -212,9 +217,9 @@ def test_main_no_mdns_disables_advertisement(
     monkeypatch.setattr(cli, "_run", fake_run)
     monkeypatch.setattr(ownership, "release_lock_if_owner", lambda info: True)
 
-    main(["--no-mdns"])
+    main(argv)
 
-    assert called == {"advertise_mdns": False}
+    assert called == {"advertise_mdns": expected_mdns}
 
 
 @pytest.mark.asyncio
@@ -256,8 +261,6 @@ async def test_run_sigterm_handler_cancels_and_stops_gateway(
 
     assert registered_handlers.keys() == {signal.SIGTERM}
     assert events == [("start", False), "stdio", "stop"]
-
-
 
 
 @pytest.mark.asyncio
@@ -318,6 +321,7 @@ async def test_run_rotates_event_log_only_when_jsonl_enabled(
         "stdio",
         "stop",
     ]
+
 
 def test_main_check_flag_remains_side_effect_free_with_no_mdns(
     monkeypatch: pytest.MonkeyPatch,
@@ -386,10 +390,8 @@ def test_streamable_http_releases_lock_after_daemon_exit(
     monkeypatch.setattr(cli, "_acquire_startup_lock", fake_acquire)
     monkeypatch.setattr(cli, "_run_streamable_http_daemon", fake_daemon)
     monkeypatch.setattr(ownership, "release_lock_if_owner", released.append)
-    monkeypatch.delenv("MCP_HTTP_HOST", raising=False)
-    monkeypatch.delenv("MCP_HTTP_PORT", raising=False)
-    monkeypatch.delenv("STACKCHAN_TOKEN", raising=False)
-    monkeypatch.delenv("BEARER_TOKEN", raising=False)
+    for var in ("MCP_HTTP_HOST", "MCP_HTTP_PORT", "STACKCHAN_TOKEN", "BEARER_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
 
     cli._run_streamable_http_placeholder(advertise_mdns=False)
 
@@ -412,58 +414,95 @@ def test_streamable_http_releases_lock_after_daemon_exit(
     assert released == [info]
 
 
-def test_format_port_status_available() -> None:
-    assert _format_port_status(True, None) == "AVAILABLE"
+@pytest.mark.parametrize(
+    "available, holder, expected",
+    [
+        (True, None, "AVAILABLE"),
+        (False, None, "IN USE"),
+        (False, "pid 12345, python", "IN USE (pid 12345, python)"),
+        # Non-EADDRINUSE bind failures must not be reported as ``IN USE``:
+        # showing ``IN USE`` for, say, ``EADDRNOTAVAIL`` (HOST not
+        # assigned to this machine) sends the user looking for a
+        # competing process that does not exist.
+        (
+            False,
+            "bind error: Cannot assign requested address",
+            "BIND ERROR (Cannot assign requested address)",
+        ),
+    ],
+)
+def test_format_port_status(
+    available: bool, holder: str | None, expected: str
+) -> None:
+    assert _format_port_status(available, holder) == expected
 
 
-def test_format_port_status_in_use_no_holder() -> None:
-    assert _format_port_status(False, None) == "IN USE"
-
-
-def test_format_port_status_in_use_with_holder() -> None:
-    assert (
-        _format_port_status(False, "pid 12345, python")
-        == "IN USE (pid 12345, python)"
-    )
-
-
-def test_format_port_status_bind_error_is_not_in_use() -> None:
-    """Non-EADDRINUSE bind failures must not be reported as ``IN USE``.
-
-    Showing ``IN USE`` for, say, ``EADDRNOTAVAIL`` (HOST not assigned
-    to this machine) sends the user looking for a competing process
-    that does not exist.
-    """
-    holder = "bind error: Cannot assign requested address"
-    assert (
-        _format_port_status(False, holder)
-        == "BIND ERROR (Cannot assign requested address)"
-    )
-
-
-def test_check_port_bind_error_when_host_not_local() -> None:
-    """A LAN-but-not-local IP triggers EADDRNOTAVAIL, not EADDRINUSE.
-
-    Binding to an IP that is not assigned to any local interface fails
-    with ``EADDRNOTAVAIL`` on macOS / Linux. The probe must report this
-    distinct from "port in use" so the diagnostic does not mislead.
-    192.0.2.0/24 (TEST-NET-1, RFC 5737) is reserved for documentation
-    and is virtually guaranteed not to be on a developer's machine.
-    """
-    available, info = _check_port("192.0.2.1", 0)
+@pytest.mark.parametrize(
+    "host, expected_info",
+    [
+        # A LAN-but-not-local IP triggers EADDRNOTAVAIL, not EADDRINUSE.
+        # 192.0.2.0/24 (TEST-NET-1, RFC 5737) is reserved for
+        # documentation and virtually guaranteed not to be on a
+        # developer's machine.
+        ("192.0.2.1", None),
+        # ``.invalid`` is reserved by RFC 6761 and never resolves; the
+        # ``getaddrinfo`` failure is reported as a bind error, not a
+        # crash.
+        ("nonexistent.invalid", "getaddrinfo failed"),
+    ],
+    ids=["host_not_local", "unresolvable_host"],
+)
+def test_check_port_unbindable_host_returns_bind_error(
+    host: str, expected_info: str | None
+) -> None:
+    available, info = _check_port(host, 0)
     assert available is False
     assert info is not None
     assert info.startswith("bind error:")
+    if expected_info is not None:
+        assert expected_info in info
 
 
-def test_check_port_unresolvable_host_returns_bind_error() -> None:
-    """``getaddrinfo`` failure is reported as a bind error, not a crash."""
-    # ``.invalid`` is reserved by RFC 6761 and never resolves.
-    available, info = _check_port("nonexistent.invalid", 0)
-    assert available is False
-    assert info is not None
-    assert info.startswith("bind error:")
-    assert "getaddrinfo failed" in info
+@pytest.mark.parametrize(
+    ("host", "family"),
+    [
+        ("127.0.0.1", socket.AF_INET),
+        pytest.param(
+            "::1",
+            socket.AF_INET6,
+            marks=pytest.mark.skipif(
+                not socket.has_ipv6,
+                reason="IPv6 stack not available on this host",
+            ),
+        ),
+    ],
+    ids=["ipv4_unbound_port", "ipv6_loopback"],
+)
+def test_check_port_against_unbound_port_reports_available(
+    host: str, family: int
+) -> None:
+    """Ask the OS for an ephemeral port, release it, then probe.
+
+    Not perfectly race-free (something else could grab the port between
+    ``close()`` and ``_check_port``'s bind), but the window is tiny and
+    this gives confidence that ``_check_port`` plays nicely with the
+    real socket layer rather than only the mocked variant. The ``::1``
+    row is the regression guard for the IPv6 fix: the previous probe
+    pinned ``AF_INET``, which would misreport an IPv6-only or
+    dual-stack ``localhost`` setup.
+    """
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        sock.bind((host, 0))
+    except OSError:
+        sock.close()
+        pytest.skip("loopback not configured on this host")
+    port = sock.getsockname()[1]
+    sock.close()
+
+    available, holder = _check_port(host, port)
+    assert available is True
+    assert holder is None
 
 
 def test_check_port_resolves_via_getaddrinfo_for_localhost() -> None:
@@ -489,47 +528,6 @@ def test_check_port_resolves_via_getaddrinfo_for_localhost() -> None:
         assert info is None or info.startswith("bind error:") or "pid" in info
 
 
-@pytest.mark.skipif(
-    not socket.has_ipv6, reason="IPv6 stack not available on this host"
-)
-def test_check_port_against_unbound_ipv6_loopback_reports_available() -> None:
-    """``::1`` (IPv6 loopback) must be reachable through the new probe.
-
-    Pre-fix this would have raised because the socket was hard-coded
-    to ``AF_INET``; the new ``getaddrinfo`` resolver picks ``AF_INET6``
-    for the literal address.
-    """
-    sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-    try:
-        sock.bind(("::1", 0))
-    except OSError:
-        pytest.skip("IPv6 loopback not configured on this host")
-    port = sock.getsockname()[1]
-    sock.close()
-
-    available, holder = _check_port("::1", port)
-    assert available is True
-    assert holder is None
-
-
-def test_check_port_against_unbound_port_reports_available() -> None:
-    """Ask the OS for an ephemeral port, release it, then probe.
-
-    Not perfectly race-free (something else could grab the port between
-    ``close()`` and ``_check_port``'s bind), but the window is tiny and
-    this gives confidence that ``_check_port`` plays nicely with the
-    real socket layer rather than only the mocked variant.
-    """
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-
-    available, holder = _check_port("127.0.0.1", port)
-    assert available is True
-    assert holder is None
-
-
 def test_check_port_against_held_port_reports_in_use() -> None:
     held = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     held.bind(("127.0.0.1", 0))
@@ -547,13 +545,8 @@ def test_run_preflight_with_no_config_reports_defaults_and_exits_zero(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    _isolate_preflight_env(monkeypatch, tmp_path)
-    # Don't actually open sockets in the test process.
-    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
-
-    exit_code = _run_preflight()
+    exit_code, out = _preflight_out(monkeypatch, capsys, tmp_path)
     assert exit_code == 0
-    out = capsys.readouterr().out
     assert "STACKCHAN_TOKEN     not set" in out
     assert "MCP_HTTP_ALLOWED_HOSTS not set" in out
     assert "VISION_HOST         not set" in out
@@ -572,15 +565,17 @@ def test_run_preflight_masks_secrets_and_derives_vision_url(
     tmp_path: Path,
 ) -> None:
     """Tokens must never be echoed; VISION_URL is derived from VISION_HOST."""
-    _isolate_preflight_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("STACKCHAN_TOKEN", "super-secret-token-value")
-    monkeypatch.setenv("VISION_HOST", "192.168.1.42")
-    monkeypatch.setenv("VISION_TOKEN", "another-secret-value")
-    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
-
-    exit_code = _run_preflight()
+    exit_code, out = _preflight_out(
+        monkeypatch,
+        capsys,
+        tmp_path,
+        env={
+            "STACKCHAN_TOKEN": "super-secret-token-value",
+            "VISION_HOST": "192.168.1.42",
+            "VISION_TOKEN": "another-secret-value",
+        },
+    )
     assert exit_code == 0
-    out = capsys.readouterr().out
     assert "super-secret-token-value" not in out
     assert "another-secret-value" not in out
     # Both tokens should be reported as redacted, not as their raw value.
@@ -595,13 +590,15 @@ def test_run_preflight_explicit_vision_url_overrides_derivation(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    _isolate_preflight_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("VISION_HOST", "192.168.1.42")
-    monkeypatch.setenv("VISION_URL", "https://stackchan.example.ts.net/capture")
-    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
-
-    _run_preflight()
-    out = capsys.readouterr().out
+    _, out = _preflight_out(
+        monkeypatch,
+        capsys,
+        tmp_path,
+        env={
+            "VISION_HOST": "192.168.1.42",
+            "VISION_URL": "https://stackchan.example.ts.net/capture",
+        },
+    )
     assert "VISION_URL          https://stackchan.example.ts.net/capture" in out
     # The derived line must not appear when an explicit URL is set.
     assert "(derived)" not in out
@@ -681,15 +678,14 @@ def test_run_preflight_redacts_explicit_vision_url(
     so signed-URL secrets and Basic-auth userinfo have to be masked at
     print time.
     """
-    _isolate_preflight_env(monkeypatch, tmp_path)
-    monkeypatch.setenv(
-        "VISION_URL",
-        "https://signer:topsecret@example.com/capture?token=tk_abc123",
+    _, out = _preflight_out(
+        monkeypatch,
+        capsys,
+        tmp_path,
+        env={
+            "VISION_URL": "https://signer:topsecret@example.com/capture?token=tk_abc123"
+        },
     )
-    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
-
-    _run_preflight()
-    out = capsys.readouterr().out
     assert "topsecret" not in out
     assert "tk_abc123" not in out
     assert "signer" not in out
@@ -701,16 +697,13 @@ def test_run_preflight_in_use_ports_return_nonzero(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    _isolate_preflight_env(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        cli,
-        "_check_port",
-        lambda host, port: (False, f"pid 12345, mock-{port}"),
+    exit_code, out = _preflight_out(
+        monkeypatch,
+        capsys,
+        tmp_path,
+        check=lambda host, port: (False, f"pid 12345, mock-{port}"),
     )
-
-    exit_code = _run_preflight()
     assert exit_code == 1
-    out = capsys.readouterr().out
     assert "IN USE (pid 12345, mock-8765)" in out
     assert "IN USE (pid 12345, mock-8766)" in out
     assert "IN USE (pid 12345, mock-8767)" in out
@@ -722,18 +715,15 @@ def test_run_preflight_one_in_use_port_singular_phrasing(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    _isolate_preflight_env(monkeypatch, tmp_path)
-
     def fake_check(host: str, port: int) -> tuple[bool, str | None]:
         if port == 8765:
             return (False, "pid 999, fake")
         return (True, None)
 
-    monkeypatch.setattr(cli, "_check_port", fake_check)
-
-    exit_code = _run_preflight()
+    exit_code, out = _preflight_out(
+        monkeypatch, capsys, tmp_path, check=fake_check
+    )
     assert exit_code == 1
-    out = capsys.readouterr().out
     # Singular ``issue`` (not ``issues``) when exactly one port is held.
     assert "Result: 1 issue. Exit 1." in out
 
@@ -776,76 +766,67 @@ def test_main_preflight_flag_runs_preflight_and_exits(
 # --- Port resolution tests (must mirror gateway.py) -------------------------
 
 
-def test_resolve_ws_port_defaults_to_8765(
+@pytest.mark.parametrize(
+    "set_env, del_env, expected_port, expected_source",
+    [
+        ({"WS_PORT": "9000", "PORT": "9001"}, [], 9000, "WS_PORT"),
+        # gateway.py: int(os.getenv("WS_PORT", os.getenv("PORT", "8765"))).
+        ({"PORT": "9001"}, [], 9001, "PORT"),
+        # ``0`` lets the OS pick an ephemeral port — bind-able, so it is
+        # accepted even though production may not want it.
+        ({"WS_PORT": "0"}, [], 0, "WS_PORT"),
+        (
+            {},
+            ["WS_PORT", "PORT"],
+            8765,
+            "default",
+        ),
+    ],
+    ids=[
+        "prefers_ws_port_over_port",
+        "falls_back_to_PORT",
+        "zero_is_accepted",
+        "defaults_to_8765",
+    ],
+)
+def test_resolve_ws_port_environment_lookup(
     monkeypatch: pytest.MonkeyPatch,
+    set_env: dict[str, str],
+    del_env: list[str],
+    expected_port: int | None,
+    expected_source: str,
 ) -> None:
-    monkeypatch.delenv("WS_PORT", raising=False)
-    monkeypatch.delenv("PORT", raising=False)
+    for var in del_env:
+        monkeypatch.delenv(var, raising=False)
+    for key, value in set_env.items():
+        monkeypatch.setenv(key, value)
     port, source = cli._resolve_ws_port()
-    assert port == 8765
-    assert source == "default"
+    assert port == expected_port
+    assert source == expected_source
 
 
-def test_resolve_ws_port_prefers_ws_port_over_port(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("WS_PORT", "9000")
-    monkeypatch.setenv("PORT", "9001")
-    port, source = cli._resolve_ws_port()
-    assert port == 9000
-    assert source == "WS_PORT"
-
-
-def test_resolve_ws_port_falls_back_to_PORT(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """gateway.py: int(os.getenv("WS_PORT", os.getenv("PORT", "8765")))."""
-    monkeypatch.delenv("WS_PORT", raising=False)
-    monkeypatch.setenv("PORT", "9001")
-    port, source = cli._resolve_ws_port()
-    assert port == 9001
-    assert source == "PORT"
-
-
+@pytest.mark.parametrize(
+    "value, expected_in",
+    [
+        ("abc", ["WS_PORT", "not an integer"]),
+        # Values outside 0-65535 must be rejected before they reach
+        # bind(): socket.bind() raises OverflowError for out-of-range
+        # ints, which would crash --check with a stack trace instead of
+        # producing the diagnostic report it is meant to produce.
+        ("-1", ["out of TCP port range"]),
+        ("65536", ["out of TCP port range"]),
+        ("100000", ["out of TCP port range"]),
+    ],
+    ids=["not_an_integer", "negative", "one_over_65535", "way_out_of_range"],
+)
 def test_resolve_ws_port_invalid_value_returns_none(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, value: str, expected_in: list[str]
 ) -> None:
-    monkeypatch.setenv("WS_PORT", "abc")
+    monkeypatch.setenv("WS_PORT", value)
     port, source = cli._resolve_ws_port()
     assert port is None
-    assert "WS_PORT" in source
-    assert "not an integer" in source
-
-
-@pytest.mark.parametrize("bad_value", ["-1", "65536", "100000"])
-def test_resolve_ws_port_out_of_range_returns_none(
-    monkeypatch: pytest.MonkeyPatch, bad_value: str
-) -> None:
-    """Values outside 0-65535 must be rejected before they reach bind().
-
-    ``socket.bind()`` raises ``OverflowError`` for integers outside the
-    TCP port range, which would crash ``--check`` with a stack trace
-    instead of producing the diagnostic report it is meant to produce.
-    """
-    monkeypatch.setenv("WS_PORT", bad_value)
-    port, source = cli._resolve_ws_port()
-    assert port is None
-    assert "out of TCP port range" in source
-
-
-def test_resolve_ws_port_zero_is_accepted(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``0`` lets the OS pick an ephemeral port — bind-able, so accept it.
-
-    The gateway may not actually want this in production, but it is a
-    valid TCP port value and ``bind((host, 0))`` succeeds. Preflight
-    only filters out values that would crash ``bind()``.
-    """
-    monkeypatch.setenv("WS_PORT", "0")
-    port, source = cli._resolve_ws_port()
-    assert port == 0
-    assert source == "WS_PORT"
+    for text in expected_in:
+        assert text in source
 
 
 def test_resolve_capture_port_defaults_to_8766(
@@ -857,202 +838,133 @@ def test_resolve_capture_port_defaults_to_8766(
     assert source == "default"
 
 
+@pytest.mark.parametrize(
+    "value, expected_in",
+    [
+        ("not-a-number", ["CAPTURE_PORT", "not an integer"]),
+        ("-1", ["out of TCP port range"]),
+        ("65536", ["out of TCP port range"]),
+        ("99999", ["out of TCP port range"]),
+    ],
+    ids=["not_an_integer", "negative", "one_over_65535", "way_out_of_range"],
+)
 def test_resolve_capture_port_invalid_value_returns_none(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, value: str, expected_in: list[str]
 ) -> None:
-    monkeypatch.setenv("CAPTURE_PORT", "not-a-number")
+    monkeypatch.setenv("CAPTURE_PORT", value)
     port, source = cli._resolve_capture_port()
     assert port is None
-    assert "CAPTURE_PORT" in source
-    assert "not an integer" in source
+    for text in expected_in:
+        assert text in source
 
 
-@pytest.mark.parametrize("bad_value", ["-1", "65536", "99999"])
-def test_resolve_capture_port_out_of_range_returns_none(
-    monkeypatch: pytest.MonkeyPatch, bad_value: str
-) -> None:
-    monkeypatch.setenv("CAPTURE_PORT", bad_value)
-    port, source = cli._resolve_capture_port()
-    assert port is None
-    assert "out of TCP port range" in source
-
-
-def test_run_preflight_out_of_range_ws_port_is_blocking(
+@pytest.mark.parametrize(
+    "env, expected_in",
+    [
+        # Out-of-range must be reported, not crashed on: pre-fix,
+        # ``WS_PORT=65536`` parsed as int and reached socket.bind(),
+        # which raised OverflowError and aborted the preflight without
+        # printing the result line.
+        (
+            {"WS_PORT": "65536"},
+            ["INVALID", "out of TCP port range"],
+        ),
+        # ``WS_PORT=<garbage>`` must NOT silently fall back to the
+        # default — the gateway wraps the lookup in int(...) with no
+        # try/except, so silence would report "ready" for an
+        # environment the gateway would actually refuse to start.
+        (
+            {"WS_PORT": "not-a-number"},
+            ["INVALID", "WS_PORT", "Result: 1 issue. Exit 1."],
+        ),
+        ({"CAPTURE_PORT": "garbage"}, ["INVALID", "CAPTURE_PORT"]),
+        ({"MCP_HTTP_PORT": "not-a-number"}, ["INVALID", "MCP_HTTP_PORT"]),
+    ],
+    ids=[
+        "out_of_range_ws_port",
+        "invalid_ws_port",
+        "invalid_capture_port",
+        "invalid_mcp_http_port",
+    ],
+)
+def test_run_preflight_invalid_port_value_is_blocking(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
+    env: dict[str, str],
+    expected_in: list[str],
 ) -> None:
-    """Out-of-range WS port must be reported, not crashed on.
-
-    Before this guard, ``WS_PORT=65536`` would parse as int and reach
-    ``socket.bind()``, which raises ``OverflowError`` and aborts the
-    preflight without printing the result line — exactly the failure
-    mode ``--check`` is meant to catch in advance.
-    """
-    _isolate_preflight_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("WS_PORT", "65536")
-    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
-
-    exit_code = _run_preflight()
+    exit_code, out = _preflight_out(monkeypatch, capsys, tmp_path, env=env)
     assert exit_code == 1
-    out = capsys.readouterr().out
-    assert "INVALID" in out
-    assert "out of TCP port range" in out
+    for text in expected_in:
+        assert text in out
 
 
-def test_run_preflight_invalid_ws_port_is_blocking(
+@pytest.mark.parametrize(
+    "env, expected_code, expected_in, expected_not_in",
+    [
+        (
+            {"MCP_HTTP_HOST": "0.0.0.0", "STACKCHAN_TOKEN": "secret"},
+            0,
+            ["http://0.0.0.0:8767/mcp", "Result: ready. Exit 0."],
+            ["MCP HTTP bind safety: BLOCKED"],
+        ),
+        (
+            {"MCP_HTTP_HOST": "0.0.0.0"},
+            1,
+            ["MCP HTTP bind safety: BLOCKED", "Result: 1 issue. Exit 1."],
+            [],
+        ),
+    ],
+    ids=["with_token_ready", "without_token_blocked"],
+)
+def test_run_preflight_non_loopback_mcp_http_bind_safety(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
+    env: dict[str, str],
+    expected_code: int,
+    expected_in: list[str],
+    expected_not_in: list[str],
 ) -> None:
-    """``WS_PORT=<garbage>`` must NOT silently fall back to the default.
+    exit_code, out = _preflight_out(monkeypatch, capsys, tmp_path, env=env)
+    assert exit_code == expected_code
+    for text in expected_in:
+        assert text in out
+    for text in expected_not_in:
+        assert text not in out
 
-    The gateway itself wraps the lookup in ``int(...)`` without a
-    try/except — silent fallback in preflight would mean reporting
-    "ready" for an environment the gateway would actually refuse to
-    start. That is the exact failure mode --check is meant to catch.
-    """
-    _isolate_preflight_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("WS_PORT", "not-a-number")
-    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
 
-    exit_code = _run_preflight()
+@pytest.mark.parametrize(
+    "env, expected_in",
+    [
+        # ``WS_PORT == CAPTURE_PORT`` must be flagged even when the port
+        # is free: ``_check_port`` binds-and-releases each port
+        # independently, but the gateway holds the WebSocket port for
+        # the whole process lifetime, so a subsequent capture bind
+        # would fail.
+        (
+            {"WS_PORT": "8765", "CAPTURE_PORT": "8765"},
+            ["8765", "distinct ports"],
+        ),
+        (
+            {"CAPTURE_PORT": "8767", "MCP_HTTP_PORT": "8767"},
+            ["MCP_HTTP_PORT", "CAPTURE_PORT", "distinct listener ports"],
+        ),
+    ],
+    ids=["ws_and_capture_same_port", "mcp_http_and_capture_same_port"],
+)
+def test_run_preflight_listener_port_conflict_is_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    env: dict[str, str],
+    expected_in: list[str],
+) -> None:
+    exit_code, out = _preflight_out(monkeypatch, capsys, tmp_path, env=env)
     assert exit_code == 1
-    out = capsys.readouterr().out
-    assert "INVALID" in out
-    assert "WS_PORT" in out
-    assert "Result: 1 issue. Exit 1." in out
-
-
-def test_run_preflight_invalid_capture_port_is_blocking(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    _isolate_preflight_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("CAPTURE_PORT", "garbage")
-    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
-
-    exit_code = _run_preflight()
-    assert exit_code == 1
-    out = capsys.readouterr().out
-    assert "INVALID" in out
-    assert "CAPTURE_PORT" in out
-
-
-def test_run_preflight_invalid_mcp_http_port_is_blocking(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    _isolate_preflight_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("MCP_HTTP_PORT", "not-a-number")
-    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
-
-    exit_code = _run_preflight()
-    assert exit_code == 1
-    out = capsys.readouterr().out
-    assert "INVALID" in out
-    assert "MCP_HTTP_PORT" in out
-
-
-def test_run_preflight_non_loopback_mcp_http_without_token_is_blocking(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    _isolate_preflight_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("MCP_HTTP_HOST", "0.0.0.0")
-    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
-
-    exit_code = _run_preflight()
-    assert exit_code == 1
-    out = capsys.readouterr().out
-    assert "MCP HTTP bind safety: BLOCKED" in out
-    assert "Result: 1 issue. Exit 1." in out
-
-
-def test_run_preflight_non_loopback_mcp_http_with_token_is_ready(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    _isolate_preflight_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("MCP_HTTP_HOST", "0.0.0.0")
-    monkeypatch.setenv("STACKCHAN_TOKEN", "secret")
-    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
-
-    exit_code = _run_preflight()
-    assert exit_code == 0
-    out = capsys.readouterr().out
-    assert "MCP HTTP bind safety: BLOCKED" not in out
-    assert "http://0.0.0.0:8767/mcp" in out
-    assert "Result: ready. Exit 0." in out
-
-
-def test_run_preflight_uses_PORT_fallback_for_ws_port(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    """``PORT=<value>`` must be honored when ``WS_PORT`` is unset.
-
-    ``gateway.py`` resolves ``WS_PORT`` → ``PORT`` → ``8765``, so the
-    preflight must check the same port that ``Gateway.start()`` will
-    actually bind to.
-    """
-    _isolate_preflight_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("PORT", "9999")
-    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
-
-    _run_preflight()
-    out = capsys.readouterr().out
-    assert "ws://0.0.0.0:9999" in out
-    # Capture port still falls through to its own default.
-    assert "http://0.0.0.0:8766" in out
-
-
-def test_run_preflight_ws_and_capture_same_port_is_conflict(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    """``WS_PORT == CAPTURE_PORT`` must be flagged even when the port is free.
-
-    ``_check_port`` binds-and-releases each port independently, so two
-    successive probes for the same free port both report AVAILABLE.
-    The gateway, however, holds the WebSocket port for the entire
-    process lifetime, so a subsequent capture bind would fail. The
-    conflict has to be caught at the configuration layer.
-    """
-    _isolate_preflight_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("WS_PORT", "8765")
-    monkeypatch.setenv("CAPTURE_PORT", "8765")
-    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
-
-    exit_code = _run_preflight()
-    assert exit_code == 1
-    out = capsys.readouterr().out
-    assert "8765" in out
-    assert "distinct ports" in out
-
-
-def test_run_preflight_mcp_http_port_conflict_is_blocking(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    _isolate_preflight_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("CAPTURE_PORT", "8767")
-    monkeypatch.setenv("MCP_HTTP_PORT", "8767")
-    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
-
-    exit_code = _run_preflight()
-    assert exit_code == 1
-    out = capsys.readouterr().out
-    assert "MCP_HTTP_PORT" in out
-    assert "CAPTURE_PORT" in out
-    assert "distinct listener ports" in out
+    for text in expected_in:
+        assert text in out
 
 
 def test_run_preflight_both_ports_zero_is_not_a_conflict(
@@ -1069,16 +981,34 @@ def test_run_preflight_both_ports_zero_is_not_a_conflict(
     ``--check`` would falsely fail a supported gateway start-up
     scenario.
     """
-    _isolate_preflight_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("WS_PORT", "0")
-    monkeypatch.setenv("CAPTURE_PORT", "0")
-    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
-
-    exit_code = _run_preflight()
+    exit_code, out = _preflight_out(
+        monkeypatch,
+        capsys,
+        tmp_path,
+        env={"WS_PORT": "0", "CAPTURE_PORT": "0"},
+    )
     assert exit_code == 0
-    out = capsys.readouterr().out
     assert "distinct ports" not in out
     assert "Result: ready. Exit 0." in out
+
+
+def test_run_preflight_uses_PORT_fallback_for_ws_port(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """``PORT=<value>`` must be honored when ``WS_PORT`` is unset.
+
+    ``gateway.py`` resolves ``WS_PORT`` → ``PORT`` → ``8765``, so the
+    preflight must check the same port that ``Gateway.start()`` will
+    actually bind to.
+    """
+    _, out = _preflight_out(
+        monkeypatch, capsys, tmp_path, env={"PORT": "9999"}
+    )
+    assert "ws://0.0.0.0:9999" in out
+    # Capture port still falls through to its own default.
+    assert "http://0.0.0.0:8766" in out
 
 
 # ---------------------------------------------------------------------------
@@ -1086,11 +1016,21 @@ def test_run_preflight_both_ports_zero_is_not_a_conflict(
 # ---------------------------------------------------------------------------
 
 
-def test_ensure_libopus_findable_noop_on_non_macos(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    "os_name, isdir",
+    [
+        ("Linux", None),
+        ("Darwin", False),
+    ],
+    ids=["noop_on_non_macos", "missing_homebrew"],
+)
+def test_ensure_libopus_findable_leaves_dyld_unset(
+    monkeypatch: pytest.MonkeyPatch, os_name: str, isdir: bool | None
 ) -> None:
-    """The helper is a strict no-op when the host platform is not macOS."""
-    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    """The helper leaves DYLD_LIBRARY_PATH alone when there is no Homebrew lib."""
+    monkeypatch.setattr(cli.platform, "system", lambda: os_name)
+    if isdir is not None:
+        monkeypatch.setattr(cli.os.path, "isdir", lambda p: isdir)
     monkeypatch.delenv("DYLD_LIBRARY_PATH", raising=False)
 
     cli._ensure_libopus_findable()
@@ -1098,10 +1038,26 @@ def test_ensure_libopus_findable_noop_on_non_macos(
     assert "DYLD_LIBRARY_PATH" not in os.environ
 
 
+@pytest.mark.parametrize(
+    "initial_env, expected",
+    [
+        (None, "/opt/homebrew/lib"),
+        (
+            "/opt/homebrew/lib:/some/other/lib",
+            "/opt/homebrew/lib:/some/other/lib",
+        ),
+    ],
+    ids=["prepends_homebrew_lib", "does_not_duplicate_existing_entries"],
+)
 def test_ensure_libopus_findable_prepends_homebrew_lib(
     monkeypatch: pytest.MonkeyPatch,
+    initial_env: str | None,
+    expected: str,
 ) -> None:
-    """A present Homebrew lib directory is prepended to DYLD_LIBRARY_PATH."""
+    """A present Homebrew lib directory is prepended to DYLD_LIBRARY_PATH.
+
+    An entry already on DYLD_LIBRARY_PATH is not re-prepended.
+    """
     monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
     # Pretend only /opt/homebrew/lib exists (Apple Silicon default).
     monkeypatch.setattr(
@@ -1109,34 +1065,14 @@ def test_ensure_libopus_findable_prepends_homebrew_lib(
         "isdir",
         lambda p: p == "/opt/homebrew/lib",
     )
-    monkeypatch.delenv("DYLD_LIBRARY_PATH", raising=False)
+    if initial_env is None:
+        monkeypatch.delenv("DYLD_LIBRARY_PATH", raising=False)
+    else:
+        monkeypatch.setenv("DYLD_LIBRARY_PATH", initial_env)
 
     cli._ensure_libopus_findable()
 
-    assert os.environ["DYLD_LIBRARY_PATH"] == "/opt/homebrew/lib"
-
-
-def test_ensure_libopus_findable_does_not_duplicate_existing_entries(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An entry already on DYLD_LIBRARY_PATH is not re-prepended."""
-    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(
-        cli.os.path,
-        "isdir",
-        lambda p: p == "/opt/homebrew/lib",
-    )
-    monkeypatch.setenv(
-        "DYLD_LIBRARY_PATH", "/opt/homebrew/lib:/some/other/lib"
-    )
-
-    cli._ensure_libopus_findable()
-
-    # Unchanged because the only candidate was already present.
-    assert (
-        os.environ["DYLD_LIBRARY_PATH"]
-        == "/opt/homebrew/lib:/some/other/lib"
-    )
+    assert os.environ["DYLD_LIBRARY_PATH"] == expected
 
 
 def test_ensure_libopus_findable_preserves_user_dyld_priority(
@@ -1166,16 +1102,3 @@ def test_ensure_libopus_findable_preserves_user_dyld_priority(
     assert "/Users/dev/libopus-build/lib" in parts
     assert "/opt/homebrew/lib" in parts
     assert "/usr/local/lib" in parts
-
-
-def test_ensure_libopus_findable_handles_missing_homebrew(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """If neither Homebrew prefix exists, DYLD_LIBRARY_PATH is left alone."""
-    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(cli.os.path, "isdir", lambda p: False)
-    monkeypatch.delenv("DYLD_LIBRARY_PATH", raising=False)
-
-    cli._ensure_libopus_findable()
-
-    assert "DYLD_LIBRARY_PATH" not in os.environ

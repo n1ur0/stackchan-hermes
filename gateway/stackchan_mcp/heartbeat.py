@@ -69,10 +69,11 @@ import json
 import logging
 import os
 import random
-import tempfile
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from .statefile import env_float, read_json_dict, write_json_atomic
 
 from . import activity_log, multiturn, notes, weather
 from .audio_stream import is_recording
@@ -112,6 +113,7 @@ class SpeakConfig:
     state_path: Path = dataclasses.field(
         default_factory=lambda: Path(DEFAULT_STATE_PATH).expanduser()
     )
+
 
 #: M5Stack-recommended servo operating range (matches the move_head
 #: MCP tool validation in stdio_server.py).
@@ -154,9 +156,7 @@ def is_quiet(now: _dt.time, quiet: tuple[_dt.time, _dt.time] | None) -> bool:
     return now >= start or now < end
 
 
-def compute_delay_s(
-    interval_min: float, jitter: float, rng: random.Random
-) -> float:
+def compute_delay_s(interval_min: float, jitter: float, rng: random.Random) -> float:
     """Next sleep in seconds: interval ± jitter, never below 10 s."""
     factor = rng.uniform(1.0 - jitter, 1.0 + jitter)
     return max(10.0, interval_min * 60.0 * factor)
@@ -173,14 +173,7 @@ def _memo_snippet(content: str) -> str:
 
 def _env_number(name: str, default: float) -> float:
     """A numeric env var, warning and falling back on garbage."""
-    raw = os.getenv(name, "")
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning("heartbeat: invalid %s=%r; using %s", name, raw, default)
-        return default
+    return env_float(name, default, logger)
 
 
 def speak_config_from_env() -> SpeakConfig | None:
@@ -279,11 +272,11 @@ class HeartbeatRunner:
             jitter = DEFAULT_JITTER
         jitter = min(max(jitter, 0.0), 0.9)
 
-        quiet = parse_quiet_hours(
-            os.getenv("STACKCHAN_HEARTBEAT_QUIET", DEFAULT_QUIET)
-        )
+        quiet = parse_quiet_hours(os.getenv("STACKCHAN_HEARTBEAT_QUIET", DEFAULT_QUIET))
 
-        gestures = os.getenv("STACKCHAN_HEARTBEAT_GESTURES", "1").strip().lower() not in (
+        gestures = os.getenv(
+            "STACKCHAN_HEARTBEAT_GESTURES", "1"
+        ).strip().lower() not in (
             "0",
             "false",
             "no",
@@ -583,32 +576,13 @@ class HeartbeatRunner:
         path = self._speak.state_path if self._speak else None
         if path is None:
             return {}
-        try:
-            data = json.loads(path.read_text("utf-8"))
-            return data if isinstance(data, dict) else {}
-        except FileNotFoundError:
-            return {}
-        except (OSError, ValueError) as exc:
-            logger.warning("heartbeat: unreadable state file %s (%s)", path, exc)
-            return {}
+        return read_json_dict(path, logger=logger, label="heartbeat")
 
     def _save_state(self) -> None:
-        # Atomic write (write-temp + os.replace), same flavour as the
-        # control state file (stackchan_mcp.control.save_state): a crash
-        # mid-write must not truncate the day's speak-count / reminded
-        # flags into garbage.
         assert self._speak is not None
         path = self._speak.state_path
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as fp:
-                    json.dump(self._state, fp, ensure_ascii=False)
-                os.replace(tmp, path)
-            finally:
-                if os.path.exists(tmp):
-                    os.unlink(tmp)
+            write_json_atomic(path, self._state)
         except OSError as exc:
             logger.warning("heartbeat: cannot write state file %s (%s)", path, exc)
 

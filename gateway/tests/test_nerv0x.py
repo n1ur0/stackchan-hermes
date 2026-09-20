@@ -161,9 +161,37 @@ def test_tts_synthesize_posts_and_decodes_to_16k_pcm():
     assert request["path"] == "/v1/audio/speech"
     assert request["json"]["model"] == DEFAULT_TTS_MODEL
     assert request["json"]["input"] == "olá stackchan"
+    assert request["json"]["response_format"] == "wav"
+    assert "voice" not in request["json"]
 
     # 100 ms of 24 kHz source resampled to 16 kHz mono s16 ≈ 3200 bytes.
     assert 3000 < len(pcm) <= 3500
+
+
+def test_tts_default_voice_from_env(monkeypatch):
+    """STACKCHAN_TTS_VOICE is sent when the caller passes no voice."""
+    monkeypatch.setenv("STACKCHAN_TTS_VOICE", "am_michael")
+    captured: list[dict] = []
+    engine = Nerv0xTTSEngine(transport=httpx.MockTransport(_tts_handler(captured)))
+
+    __import__("asyncio").run(engine.synthesize("hello"))
+
+    assert captured, "engine never issued a request"
+    assert captured[0]["json"]["voice"] == "am_michael"
+
+
+def test_tts_constructor_voice_wins_over_env(monkeypatch):
+    """Explicit constructor voice beats STACKCHAN_TTS_VOICE."""
+    monkeypatch.setenv("STACKCHAN_TTS_VOICE", "pf_dora")
+    captured: list[dict] = []
+    engine = Nerv0xTTSEngine(
+        transport=httpx.MockTransport(_tts_handler(captured)), voice="am_michael"
+    )
+
+    __import__("asyncio").run(engine.synthesize("hello"))
+
+    assert captured, "engine never issued a request"
+    assert captured[0]["json"]["voice"] == "am_michael"
 
 
 def test_tts_rejects_empty_text():

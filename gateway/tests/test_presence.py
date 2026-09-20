@@ -20,6 +20,7 @@ import pytest
 from stackchan_mcp import presence, sensors
 from stackchan_mcp.heartbeat import HeartbeatRunner
 from stackchan_mcp.presence import PresenceMonitor, PresenceState
+from stackchan_mcp.stdio_server import _dispatch_mcp_tool
 
 
 def make_dispatch(
@@ -90,6 +91,27 @@ def make_monitor(gateway=None, *, dispatch=None, **kw) -> PresenceMonitor:
     )
 
 
+def make_clocked_monitor(
+    *, now=dt.time(12, 0), mono_start: float = 0.0, **kw
+) -> tuple[PresenceMonitor, list[float]]:
+    """Monitor with deterministic ``_now`` / ``_monotonic`` clocks."""
+    clock = [mono_start]
+    monitor = make_monitor(**kw)
+    monitor._monotonic = lambda: clock[0]
+    monitor._now = lambda: now
+    return monitor, clock
+
+
+def make_logged_monitor(
+    tmp_path, *, now=dt.time(12, 0), **kw
+) -> tuple[PresenceMonitor, Path]:
+    """Monitor that logs to a tmp jsonl path under a fixed wall clock."""
+    log = tmp_path / "presence_log.jsonl"
+    monitor = make_monitor(log_path=log, **kw)
+    monitor._now = lambda: now
+    return monitor, log
+
+
 # ---- config helpers --------------------------------------------------
 
 
@@ -155,8 +177,7 @@ def test_from_env_enabled(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_present_during_waking_hours_is_active() -> None:
-    monitor = make_monitor()
-    monitor._now = lambda: dt.time(12, 0)
+    monitor, _ = make_clocked_monitor()
     await monitor._poll_once()
     assert monitor.state is PresenceState.ACTIVE
     assert monitor.allows_heartbeat() is True
@@ -164,8 +185,9 @@ async def test_present_during_waking_hours_is_active() -> None:
 
 @pytest.mark.asyncio
 async def test_present_during_sleep_hours_is_quiet_but_allows() -> None:
-    monitor = make_monitor(sleep_window="22:00-06:30")
-    monitor._now = lambda: dt.time(23, 0)
+    monitor, _ = make_clocked_monitor(
+        sleep_window="22:00-06:30", now=dt.time(23, 0)
+    )
     await monitor._poll_once()
     assert monitor.state is PresenceState.QUIET
     # QUIET still allows the gate; the heartbeat's own quiet-hours guard
@@ -175,8 +197,7 @@ async def test_present_during_sleep_hours_is_quiet_but_allows() -> None:
 
 @pytest.mark.asyncio
 async def test_unknown_until_first_presence_is_fail_open() -> None:
-    monitor = make_monitor(dispatch=make_dispatch(dict(ABSENT_REG)))
-    monitor._now = lambda: dt.time(12, 0)
+    monitor, _ = make_clocked_monitor(dispatch=make_dispatch(dict(ABSENT_REG)))
     await monitor._poll_once()
     # Never seen anyone yet -> UNKNOWN (not ABSENT) so the gate stays open.
     assert monitor.state is PresenceState.UNKNOWN
@@ -185,10 +206,7 @@ async def test_unknown_until_first_presence_is_fail_open() -> None:
 
 @pytest.mark.asyncio
 async def test_absent_only_after_debounce() -> None:
-    clock = [0.0]
-    monitor = make_monitor(absent_after_s=120)
-    monitor._monotonic = lambda: clock[0]
-    monitor._now = lambda: dt.time(12, 0)
+    monitor, clock = make_clocked_monitor(absent_after_s=120)
 
     await monitor._poll_once()
     assert monitor.state is PresenceState.ACTIVE
@@ -217,8 +235,7 @@ async def test_disconnected_device_stays_unknown() -> None:
 
 @pytest.mark.asyncio
 async def test_sensor_errors_fall_back_to_unknown_after_threshold() -> None:
-    monitor = make_monitor()
-    monitor._now = lambda: dt.time(12, 0)
+    monitor, _ = make_clocked_monitor()
     await monitor._poll_once()
     assert monitor.state is PresenceState.ACTIVE
 
@@ -236,8 +253,7 @@ async def test_sensor_errors_fall_back_to_unknown_after_threshold() -> None:
 
 @pytest.mark.asyncio
 async def test_recovers_after_errors() -> None:
-    monitor = make_monitor(dispatch=make_dispatch({}, fail_addr=0x5A))
-    monitor._now = lambda: dt.time(12, 0)
+    monitor, _ = make_clocked_monitor(dispatch=make_dispatch({}, fail_addr=0x5A))
     for _ in range(3):
         await monitor._poll_once()
     assert monitor.state is PresenceState.UNKNOWN
@@ -362,10 +378,7 @@ def test_occupancy_missing_object_raw_falls_back_to_embedded() -> None:
 
 @pytest.mark.asyncio
 async def test_poll_once_object_raw_holds_still_occupant() -> None:
-    clock = [0.0]
-    monitor = make_monitor(absent_after_s=120)
-    monitor._monotonic = lambda: clock[0]
-    monitor._now = lambda: dt.time(12, 0)
+    monitor, clock = make_clocked_monitor(absent_after_s=120)
 
     # 1) Empty room teaches the baseline (never seen anyone -> UNKNOWN).
     monitor._dispatch = make_dispatch(reg_for(present=False, object_raw=-8700))
@@ -401,8 +414,7 @@ async def test_poll_once_object_raw_holds_still_occupant() -> None:
 
 @pytest.mark.asyncio
 async def test_snapshot_includes_occupancy() -> None:
-    monitor = make_monitor()
-    monitor._now = lambda: dt.time(12, 0)
+    monitor, _ = make_clocked_monitor()
     await monitor._poll_once()
     occ = monitor.snapshot()["occupancy"]
     assert set(occ) == {"obj_baseline", "obj_armed", "static_present"}
@@ -413,10 +425,7 @@ async def test_snapshot_includes_occupancy() -> None:
 
 @pytest.mark.asyncio
 async def test_update_config_persists_and_reapplies() -> None:
-    clock = [0.0]
-    monitor = make_monitor(absent_after_s=120)
-    monitor._monotonic = lambda: clock[0]
-    monitor._now = lambda: dt.time(12, 0)
+    monitor, clock = make_clocked_monitor(absent_after_s=120)
 
     await monitor._poll_once()  # ACTIVE, last seen at t=0
     monitor._dispatch = make_dispatch(dict(ABSENT_REG))
@@ -433,8 +442,7 @@ async def test_update_config_persists_and_reapplies() -> None:
 
 @pytest.mark.asyncio
 async def test_update_config_window_switches_mode() -> None:
-    monitor = make_monitor(sleep_window="22:00-06:30")
-    monitor._now = lambda: dt.time(12, 0)
+    monitor, _ = make_clocked_monitor(sleep_window="22:00-06:30")
     await monitor._poll_once()
     assert monitor.state is PresenceState.ACTIVE
     # Make noon a sleeping hour -> the occupied room becomes QUIET at once.
@@ -454,10 +462,7 @@ def test_update_config_rejects_bad_window() -> None:
 
 @pytest.mark.asyncio
 async def test_snapshot_shape() -> None:
-    clock = [100.0]
-    monitor = make_monitor()
-    monitor._monotonic = lambda: clock[0]
-    monitor._now = lambda: dt.time(12, 0)
+    monitor, clock = make_clocked_monitor(mono_start=100.0)
     await monitor._poll_once()
     clock[0] = 105.0
     snap = monitor.snapshot()
@@ -476,10 +481,9 @@ async def test_snapshot_shape() -> None:
 async def test_sleep_latch_holds_quiet_across_gap() -> None:
     # Confirm presence in the sleeping window, then lose it for far longer
     # than the debounce: the latch must hold QUIET, not flip to ABSENT.
-    clock = [0.0]
-    monitor = make_monitor(absent_after_s=120, sleep_window="22:00-06:30")
-    monitor._monotonic = lambda: clock[0]
-    monitor._now = lambda: dt.time(23, 0)
+    monitor, clock = make_clocked_monitor(
+        absent_after_s=120, sleep_window="22:00-06:30", now=dt.time(23, 0)
+    )
 
     await monitor._poll_once()
     assert monitor.state is PresenceState.QUIET
@@ -495,10 +499,9 @@ async def test_sleep_latch_holds_quiet_across_gap() -> None:
 @pytest.mark.asyncio
 async def test_sleep_latch_clears_on_waking() -> None:
     # Latched asleep, then morning arrives with an empty room -> ABSENT.
-    clock = [0.0]
-    monitor = make_monitor(absent_after_s=120, sleep_window="22:00-06:30")
-    monitor._monotonic = lambda: clock[0]
-    monitor._now = lambda: dt.time(23, 0)
+    monitor, clock = make_clocked_monitor(
+        absent_after_s=120, sleep_window="22:00-06:30", now=dt.time(23, 0)
+    )
     await monitor._poll_once()
     assert monitor._asleep is True
 
@@ -516,10 +519,9 @@ async def test_no_latch_when_away_into_night() -> None:
     # Present in the evening, then gone before the sleeping window and all
     # night: presence is never confirmed in the window, so the latch never
     # sets -> ABSENT. This is how sleep and away-overnight stay distinct.
-    clock = [0.0]
-    monitor = make_monitor(absent_after_s=120, sleep_window="22:00-06:30")
-    monitor._monotonic = lambda: clock[0]
-    monitor._now = lambda: dt.time(21, 0)  # waking, present
+    monitor, clock = make_clocked_monitor(
+        absent_after_s=120, sleep_window="22:00-06:30", now=dt.time(21, 0)
+    )
     await monitor._poll_once()
     assert monitor.state is PresenceState.ACTIVE
     assert monitor._asleep is False
@@ -534,8 +536,9 @@ async def test_no_latch_when_away_into_night() -> None:
 
 @pytest.mark.asyncio
 async def test_snapshot_exposes_asleep() -> None:
-    monitor = make_monitor(sleep_window="22:00-06:30")
-    monitor._now = lambda: dt.time(23, 0)
+    monitor, _ = make_clocked_monitor(
+        sleep_window="22:00-06:30", now=dt.time(23, 0)
+    )
     await monitor._poll_once()
     snap = monitor.snapshot()
     assert snap["asleep"] is True
@@ -557,36 +560,25 @@ async def test_start_stop_idempotent() -> None:
 # ---- heartbeat occupancy gate ----------------------------------------
 
 
-def test_heartbeat_skipped_when_room_empty() -> None:
+@pytest.mark.parametrize(
+    "state, reason",
+    [
+        (PresenceState.ABSENT, "room empty"),
+        (PresenceState.ACTIVE, None),
+        (PresenceState.UNKNOWN, None),
+    ],
+)
+def test_heartbeat_gate_reason(state, reason) -> None:
     gw = FakeGateway()
     monitor = make_monitor(gw)
-    monitor._state = PresenceState.ABSENT
+    monitor._state = state
     gw._presence = monitor
     runner = HeartbeatRunner(gw, interval_min=30.0)
-    assert runner._skip_reason() == "room empty"
-
-
-def test_heartbeat_allowed_when_present() -> None:
-    gw = FakeGateway()
-    monitor = make_monitor(gw)
-    monitor._state = PresenceState.ACTIVE
-    gw._presence = monitor
-    runner = HeartbeatRunner(gw, interval_min=30.0)
-    assert runner._skip_reason() is None
-
-
-def test_heartbeat_allowed_when_unknown_fail_open() -> None:
-    gw = FakeGateway()
-    monitor = make_monitor(gw)
-    monitor._state = PresenceState.UNKNOWN
-    gw._presence = monitor
-    runner = HeartbeatRunner(gw, interval_min=30.0)
-    assert runner._skip_reason() is None
+    assert runner._skip_reason() == reason
 
 
 def test_heartbeat_no_gate_without_monitor() -> None:
-    gw = FakeGateway()  # _presence is None
-    runner = HeartbeatRunner(gw, interval_min=30.0)
+    runner = HeartbeatRunner(FakeGateway(), interval_min=30.0)
     assert runner._skip_reason() is None
 
 
@@ -595,7 +587,6 @@ def test_heartbeat_no_gate_without_monitor() -> None:
 
 @pytest.mark.asyncio
 async def test_get_presence_tool_returns_snapshot() -> None:
-    from stackchan_mcp.stdio_server import _dispatch_mcp_tool
     gw = FakeGateway()
     monitor = make_monitor(gw)
     monitor._state = PresenceState.ACTIVE
@@ -608,25 +599,39 @@ async def test_get_presence_tool_returns_snapshot() -> None:
 
 @pytest.mark.asyncio
 async def test_get_presence_tool_disabled_without_monitor() -> None:
-    from stackchan_mcp.stdio_server import _dispatch_mcp_tool
-    gw = FakeGateway()  # _presence is None
-    content = await _dispatch_mcp_tool("get_presence", {}, gw)
+    content = await _dispatch_mcp_tool("get_presence", {}, FakeGateway())
     assert json.loads(content[0].text) == {"enabled": False}
 
 
 # ---- presence log (raw TMOS time series for offline analysis) ---------
 
 
-def test_resolve_log_path(monkeypatch, tmp_path) -> None:
-    monkeypatch.delenv("STACKCHAN_PRESENCE_LOG", raising=False)
-    assert presence._resolve_log_path() == Path(presence.DEFAULT_LOG_PATH).expanduser()
-    monkeypatch.setenv("STACKCHAN_PRESENCE_LOG", "off")
-    assert presence._resolve_log_path() is None
-    monkeypatch.setenv("STACKCHAN_PRESENCE_LOG", "  ")
-    assert presence._resolve_log_path() is None
+@pytest.mark.parametrize(
+    "env_var, resolver, default",
+    [
+        (
+            "STACKCHAN_PRESENCE_LOG",
+            presence._resolve_log_path,
+            Path(presence.DEFAULT_LOG_PATH).expanduser(),
+        ),
+        (
+            "STACKCHAN_PRESENCE_REPORT",
+            presence._resolve_report_dir,
+            Path(presence.DEFAULT_REPORT_DIR).expanduser(),
+        ),
+    ],
+    ids=["log", "report"],
+)
+def test_resolve_path(monkeypatch, tmp_path, env_var, resolver, default) -> None:
+    monkeypatch.delenv(env_var, raising=False)
+    assert resolver() == default
+    monkeypatch.setenv(env_var, "off")
+    assert resolver() is None
+    monkeypatch.setenv(env_var, "  ")
+    assert resolver() is None
     target = tmp_path / "p.jsonl"
-    monkeypatch.setenv("STACKCHAN_PRESENCE_LOG", str(target))
-    assert presence._resolve_log_path() == target
+    monkeypatch.setenv(env_var, str(target))
+    assert resolver() == target
 
 
 def test_from_env_sets_log_path(monkeypatch, tmp_path) -> None:
@@ -640,9 +645,7 @@ def test_from_env_sets_log_path(monkeypatch, tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_poll_appends_full_tmos_line(tmp_path) -> None:
-    log = tmp_path / "presence_log.jsonl"
-    monitor = make_monitor(log_path=log)
-    monitor._now = lambda: dt.time(12, 0)
+    monitor, log = make_logged_monitor(tmp_path)
     await monitor._poll_once()
     lines = log.read_text("utf-8").splitlines()
     assert len(lines) == 1
@@ -665,9 +668,9 @@ async def test_poll_appends_full_tmos_line(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_poll_logs_absent_rows(tmp_path) -> None:
     # An empty room must still be logged (the gaps are the whole point).
-    log = tmp_path / "presence_log.jsonl"
-    monitor = make_monitor(dispatch=make_dispatch(dict(ABSENT_REG)), log_path=log)
-    monitor._now = lambda: dt.time(12, 0)
+    monitor, log = make_logged_monitor(
+        tmp_path, dispatch=make_dispatch(dict(ABSENT_REG))
+    )
     await monitor._poll_once()
     rec = json.loads(log.read_text("utf-8").splitlines()[0])
     assert rec["present"] is False
@@ -676,8 +679,9 @@ async def test_poll_logs_absent_rows(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_poll_skips_log_on_sensor_error(tmp_path) -> None:
-    log = tmp_path / "presence_log.jsonl"
-    monitor = make_monitor(dispatch=make_dispatch({}, fail_addr=0x5A), log_path=log)
+    monitor, log = make_logged_monitor(
+        tmp_path, dispatch=make_dispatch({}, fail_addr=0x5A)
+    )
     await monitor._poll_once()
     assert not log.exists()
 
@@ -685,8 +689,7 @@ async def test_poll_skips_log_on_sensor_error(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_poll_no_log_when_disabled() -> None:
     # log_path defaults to None -> _poll_once writes nothing and never raises.
-    monitor = make_monitor()
-    monitor._now = lambda: dt.time(12, 0)
+    monitor, _ = make_clocked_monitor()
     assert monitor._log_path is None
     await monitor._poll_once()  # must not raise
 
@@ -696,7 +699,7 @@ async def test_start_prunes_old_log_entries(tmp_path) -> None:
     log = tmp_path / "presence_log.jsonl"
     # An entry from epoch 1.0 is far older than the 7-day retention window.
     log.write_text(json.dumps({"ts_unix": 1.0, "state": "active"}) + "\n", "utf-8")
-    monitor = make_monitor(poll_sec=1.0, log_path=log)
+    monitor, _ = make_logged_monitor(tmp_path, poll_sec=1.0)
     monitor.start()  # rotation runs synchronously before the poll loop
     await monitor.stop()
     assert log.read_text("utf-8") == ""
@@ -712,7 +715,7 @@ async def test_start_uses_longer_presence_retention(tmp_path) -> None:
     log.write_text(
         json.dumps({"ts_unix": twenty_days_ago, "state": "active"}) + "\n", "utf-8"
     )
-    monitor = make_monitor(poll_sec=1.0, log_path=log)
+    monitor, _ = make_logged_monitor(tmp_path, poll_sec=1.0)
     monitor.start()  # rotation runs synchronously before the poll loop
     await monitor.stop()
     assert len(log.read_text("utf-8").splitlines()) == 1
@@ -722,7 +725,6 @@ async def test_start_uses_longer_presence_retention(tmp_path) -> None:
 
 
 def test_build_report_reads_recent_days(tmp_path) -> None:
-    log = tmp_path / "presence_log.jsonl"
     now = 1_000_000.0
     # One record per day going back 0..9 days; days=7 keeps i in 0..7 (ts at
     # the cutoff boundary is inclusive), so 8 records survive.
@@ -738,8 +740,9 @@ def test_build_report_reads_recent_days(tmp_path) -> None:
         )
         for i in range(10)
     ]
+    log = tmp_path / "presence_log.jsonl"
     log.write_text("\n".join(lines) + "\n", "utf-8")
-    monitor = make_monitor(log_path=log)
+    monitor, _ = make_logged_monitor(tmp_path)
     monitor._wall_clock = lambda: now
     report = monitor.build_report(days=7)
     assert report["empty"] is False
@@ -749,14 +752,13 @@ def test_build_report_reads_recent_days(tmp_path) -> None:
 
 
 def test_build_report_empty_when_log_disabled() -> None:
-    monitor = make_monitor()  # log_path defaults to None
+    monitor, _ = make_clocked_monitor()
     assert monitor._log_path is None
     report = monitor.build_report(days=7)
     assert report["empty"] is True
 
 
 def test_build_report_passes_current_absent_after_s(tmp_path) -> None:
-    log = tmp_path / "presence_log.jsonl"
     now = 1_000_000.0
     # An ACTIVE valley so a recommendation is produced and can be compared.
     rows = [
@@ -764,29 +766,15 @@ def test_build_report_passes_current_absent_after_s(tmp_path) -> None:
         {"ts_unix": now - 40, "state": "active", "present": False, "pres_flag": False},
         {"ts_unix": now - 10, "state": "active", "present": True, "pres_flag": True},
     ]
+    log = tmp_path / "presence_log.jsonl"
     log.write_text("\n".join(json.dumps(r) for r in rows) + "\n", "utf-8")
-    monitor = make_monitor(log_path=log, absent_after_s=1080)
+    monitor, _ = make_logged_monitor(tmp_path, absent_after_s=1080)
     monitor._wall_clock = lambda: now
     report = monitor.build_report(days=7)
     assert report["recommendation"]["current_absent_after_s"] == 1080
 
 
 # ---- daily report writer ---------------------------------------------
-
-
-def test_resolve_report_dir(monkeypatch, tmp_path) -> None:
-    monkeypatch.delenv("STACKCHAN_PRESENCE_REPORT", raising=False)
-    assert (
-        presence._resolve_report_dir()
-        == Path(presence.DEFAULT_REPORT_DIR).expanduser()
-    )
-    monkeypatch.setenv("STACKCHAN_PRESENCE_REPORT", "off")
-    assert presence._resolve_report_dir() is None
-    monkeypatch.setenv("STACKCHAN_PRESENCE_REPORT", "  ")
-    assert presence._resolve_report_dir() is None
-    target = tmp_path / "rep"
-    monkeypatch.setenv("STACKCHAN_PRESENCE_REPORT", str(target))
-    assert presence._resolve_report_dir() == target
 
 
 def test_from_env_report_gated_on_log(monkeypatch, tmp_path) -> None:
@@ -802,10 +790,8 @@ def test_from_env_report_gated_on_log(monkeypatch, tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_daily_report_written_once_per_day(tmp_path) -> None:
-    log = tmp_path / "presence_log.jsonl"
     reports = tmp_path / "reports"
-    monitor = make_monitor(log_path=log, report_dir=reports)
-    monitor._now = lambda: dt.time(12, 0)
+    monitor, _ = make_logged_monitor(tmp_path, report_dir=reports)
     monitor._today = lambda: dt.date(2026, 6, 24)
     await monitor._poll_once()
     md = reports / "2026-06-24.md"
@@ -825,13 +811,11 @@ async def test_daily_report_written_once_per_day(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_daily_report_skips_when_file_exists(tmp_path) -> None:
     # Restart-safe: an existing file for today is not overwritten.
-    log = tmp_path / "presence_log.jsonl"
     reports = tmp_path / "reports"
     reports.mkdir()
     md = reports / "2026-06-24.md"
     md.write_text("SENTINEL", "utf-8")
-    monitor = make_monitor(log_path=log, report_dir=reports)
-    monitor._now = lambda: dt.time(12, 0)
+    monitor, _ = make_logged_monitor(tmp_path, report_dir=reports)
     monitor._today = lambda: dt.date(2026, 6, 24)
     await monitor._poll_once()
     assert md.read_text("utf-8") == "SENTINEL"
@@ -839,10 +823,7 @@ async def test_daily_report_skips_when_file_exists(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_daily_report_noop_when_disabled(tmp_path) -> None:
-    log = tmp_path / "presence_log.jsonl"
-    monitor = make_monitor(log_path=log)  # report_dir defaults to None
-    monitor._now = lambda: dt.time(12, 0)
-    monitor._today = lambda: dt.date(2026, 6, 24)
+    monitor, _ = make_logged_monitor(tmp_path, report_dir=None)
     assert monitor._report_dir is None
     await monitor._poll_once()  # must not raise
 
@@ -851,10 +832,7 @@ async def test_daily_report_noop_when_disabled(tmp_path) -> None:
 async def test_daily_report_write_error_does_not_kill_poll(
     tmp_path, monkeypatch
 ) -> None:
-    log = tmp_path / "presence_log.jsonl"
-    reports = tmp_path / "reports"
-    monitor = make_monitor(log_path=log, report_dir=reports)
-    monitor._now = lambda: dt.time(12, 0)
+    monitor, _ = make_logged_monitor(tmp_path, report_dir=tmp_path / "reports")
     monitor._today = lambda: dt.date(2026, 6, 24)
 
     def boom(*_a, **_k):
@@ -873,21 +851,22 @@ async def _drain() -> None:
         await asyncio.sleep(0)
 
 
+async def _poll_with_drain(monitor) -> None:
+    """Poll once, then let the detached observer task(s) finish."""
+    await monitor._poll_once()
+    await _drain()
+
+
 @pytest.mark.asyncio
 async def test_register_on_state_change_fires_on_flip() -> None:
     seen: list[tuple[PresenceState, PresenceState]] = []
-    clock = [0.0]
-    monitor = make_monitor(absent_after_s=120)
-    monitor._monotonic = lambda: clock[0]
-    monitor._now = lambda: dt.time(12, 0)
+    monitor, clock = make_clocked_monitor(absent_after_s=120)
     monitor.register_on_state_change(lambda old, new: seen.append((old, new)))
 
-    await monitor._poll_once()  # UNKNOWN -> ACTIVE
-    await _drain()
+    await _poll_with_drain(monitor)  # UNKNOWN -> ACTIVE
     monitor._dispatch = make_dispatch(dict(ABSENT_REG))
     clock[0] = 130.0
-    await monitor._poll_once()  # ACTIVE -> ABSENT (debounce elapsed)
-    await _drain()
+    await _poll_with_drain(monitor)  # ACTIVE -> ABSENT (debounce elapsed)
 
     assert seen == [
         (PresenceState.UNKNOWN, PresenceState.ACTIVE),
@@ -898,14 +877,11 @@ async def test_register_on_state_change_fires_on_flip() -> None:
 @pytest.mark.asyncio
 async def test_no_callback_when_state_unchanged() -> None:
     seen: list[tuple] = []
-    monitor = make_monitor()
-    monitor._now = lambda: dt.time(12, 0)
+    monitor, _ = make_clocked_monitor()
     monitor.register_on_state_change(lambda old, new: seen.append((old, new)))
 
-    await monitor._poll_once()  # UNKNOWN -> ACTIVE (one flip)
-    await _drain()
-    await monitor._poll_once()  # ACTIVE -> ACTIVE (no flip)
-    await _drain()
+    await _poll_with_drain(monitor)  # UNKNOWN -> ACTIVE (one flip)
+    await _poll_with_drain(monitor)  # ACTIVE -> ACTIVE (no flip)
 
     assert seen == [(PresenceState.UNKNOWN, PresenceState.ACTIVE)]
 
@@ -915,12 +891,8 @@ async def test_update_config_does_not_notify() -> None:
     # A dashboard threshold re-tune flips the state but must stay silent —
     # it is not a real occupancy event (would mis-fire welcome back/good morning).
     seen: list[tuple] = []
-    clock = [0.0]
-    monitor = make_monitor(absent_after_s=120)
-    monitor._monotonic = lambda: clock[0]
-    monitor._now = lambda: dt.time(12, 0)
-    await monitor._poll_once()  # ACTIVE, last seen at t=0
-    await _drain()
+    monitor, clock = make_clocked_monitor(absent_after_s=120)
+    await _poll_with_drain(monitor)  # ACTIVE, last seen at t=0
     monitor.register_on_state_change(lambda old, new: seen.append((old, new)))
 
     clock[0] = 200.0  # now well past a shrunken debounce
@@ -938,13 +910,11 @@ async def test_callback_exception_does_not_break_others() -> None:
     def boom(old, new):
         raise RuntimeError("observer blew up")
 
-    monitor = make_monitor()
-    monitor._now = lambda: dt.time(12, 0)
+    monitor, _ = make_clocked_monitor()
     monitor.register_on_state_change(boom)
     monitor.register_on_state_change(lambda old, new: seen.append((old, new)))
 
-    await monitor._poll_once()  # UNKNOWN -> ACTIVE
-    await _drain()
+    await _poll_with_drain(monitor)  # UNKNOWN -> ACTIVE
 
     # The raising observer is swallowed; the second one still runs.
     assert seen == [(PresenceState.UNKNOWN, PresenceState.ACTIVE)]
@@ -957,11 +927,9 @@ async def test_async_callback_is_awaited() -> None:
     async def record(old, new):
         seen.append((old, new))
 
-    monitor = make_monitor()
-    monitor._now = lambda: dt.time(12, 0)
+    monitor, _ = make_clocked_monitor()
     monitor.register_on_state_change(record)
 
-    await monitor._poll_once()
-    await _drain()
+    await _poll_with_drain(monitor)
 
     assert seen == [(PresenceState.UNKNOWN, PresenceState.ACTIVE)]

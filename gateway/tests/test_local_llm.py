@@ -189,7 +189,6 @@ def test_env_float_invalid_falls_back_and_warns(monkeypatch, caplog):
     assert "STACKCHAN_LOCAL_LLM_TIMEOUT_S" in caplog.text
 
 
-@pytest.mark.asyncio
 async def test_ask_local_survives_invalid_timeout_env(
     monkeypatch, aiohttp_unused_port
 ):
@@ -230,7 +229,6 @@ async def _run_ollama_stub(
     return runner, f"http://127.0.0.1:{port}"
 
 
-@pytest.mark.asyncio
 async def test_ask_local_success(monkeypatch, aiohttp_unused_port):
     """Happy path: payload carries model / stream=false / keep_alive and
     the system prompt; reply text comes back. A non-date turn must NOT
@@ -266,7 +264,6 @@ async def test_ask_local_success(monkeypatch, aiohttp_unused_port):
     assert payload["messages"][1] == {"role": "user", "content": "hello"}
 
 
-@pytest.mark.asyncio
 async def test_ask_local_injects_date_only_on_date_query(
     monkeypatch, aiohttp_unused_port
 ):
@@ -292,7 +289,6 @@ async def test_ask_local_injects_date_only_on_date_query(
     assert local_llm.LOCAL_NO_TOOLS_LINE in system
 
 
-@pytest.mark.asyncio
 async def test_ask_local_no_date_on_vague_turn(monkeypatch, aiohttp_unused_port):
     """Regression: a vague non-date turn ("uh") must not carry the date,
     so the local model cannot volunteer it unprompted."""
@@ -317,7 +313,6 @@ async def test_ask_local_no_date_on_vague_turn(monkeypatch, aiohttp_unused_port)
     assert "weekday" not in system
 
 
-@pytest.mark.asyncio
 async def test_ask_local_strips_think_tags(monkeypatch, aiohttp_unused_port):
     """Reasoning-model <think> blocks never reach the TTS pipeline."""
 
@@ -327,7 +322,7 @@ async def test_ask_local_strips_think_tags(monkeypatch, aiohttp_unused_port):
             {
                 "message": {
                     "role": "assistant",
-                    "content": " thinking some long thinking...\nwith newline responseyes, Thursday.",
+                    "content": "<think>some long thinking...\nwith newline</think>yes, Thursday.",
                 }
             }
         )
@@ -343,7 +338,6 @@ async def test_ask_local_strips_think_tags(monkeypatch, aiohttp_unused_port):
     assert reply == "yes, Thursday."
 
 
-@pytest.mark.asyncio
 async def test_ask_local_error_status_raises(monkeypatch, aiohttp_unused_port):
     """Non-200 from Ollama raises RuntimeError (caller falls back)."""
 
@@ -361,7 +355,6 @@ async def test_ask_local_error_status_raises(monkeypatch, aiohttp_unused_port):
         await runner.cleanup()
 
 
-@pytest.mark.asyncio
 async def test_ask_local_empty_reply_raises(monkeypatch, aiohttp_unused_port):
     """Empty / missing content raises RuntimeError (caller falls back)."""
 
@@ -379,7 +372,6 @@ async def test_ask_local_empty_reply_raises(monkeypatch, aiohttp_unused_port):
         await runner.cleanup()
 
 
-@pytest.mark.asyncio
 async def test_ask_local_without_model_raises(monkeypatch):
     monkeypatch.delenv("STACKCHAN_LOCAL_LLM_MODEL", raising=False)
     with pytest.raises(RuntimeError, match="STACKCHAN_LOCAL_LLM_MODEL"):
@@ -389,21 +381,22 @@ async def test_ask_local_without_model_raises(monkeypatch):
 # --- generate_reply (routing + fallback in the voice bridge) ------------------
 
 
-@pytest.mark.asyncio
 async def test_generate_reply_disabled_uses_hermes(monkeypatch):
     """Without STACKCHAN_LOCAL_LLM_MODEL the local path is never touched —
     identical to the pre-routing behaviour."""
     monkeypatch.delenv("STACKCHAN_LOCAL_LLM_MODEL", raising=False)
     calls: list[str] = []
 
-    async def fake_hermes(text: str, *, session_id: str | None = None) -> str:
+    async def fake_hermes(
+        text: str, *, session_id: str | None = None, on_step: Any | None = None
+    ) -> str:
         calls.append(text)
         return "hermes reply"
 
     async def fail_local(text: str, *, system_prompt: str) -> str:
         raise AssertionError("local path must not be called when disabled")
 
-    monkeypatch.setattr(hermes_bridge, "ask_hermes", fake_hermes)
+    monkeypatch.setattr(hermes_bridge, "ask_hermes_stream", fake_hermes)
     monkeypatch.setattr(local_llm, "ask_local", fail_local)
 
     reply, route = await hermes_bridge.generate_reply("good morning")
@@ -411,70 +404,74 @@ async def test_generate_reply_disabled_uses_hermes(monkeypatch):
     assert calls == ["good morning"]
 
 
-@pytest.mark.asyncio
 async def test_generate_reply_routes_short_turn_local(monkeypatch):
     monkeypatch.setenv("STACKCHAN_LOCAL_LLM_MODEL", "test-model:q4")
 
-    async def fail_hermes(text: str, *, session_id: str | None = None) -> str:
+    async def fail_hermes(
+        text: str, *, session_id: str | None = None, on_step: Any | None = None
+    ) -> str:
         raise AssertionError("Hermes must not be called on the local route")
 
     async def fake_local(text: str, *, system_prompt: str) -> str:
         assert text == "good morning"
-        assert system_prompt   # voice constraints are passed through
+        assert system_prompt  # voice constraints are passed through
         return "local reply"
 
-    monkeypatch.setattr(hermes_bridge, "ask_hermes", fail_hermes)
+    monkeypatch.setattr(hermes_bridge, "ask_hermes_stream", fail_hermes)
     monkeypatch.setattr(local_llm, "ask_local", fake_local)
 
     reply, route = await hermes_bridge.generate_reply("good morning")
     assert (reply, route) == ("local reply", "local")
 
 
-@pytest.mark.asyncio
 async def test_generate_reply_long_turn_goes_hermes(monkeypatch):
     """Routing enabled, but a deliberation-grade turn still goes to Hermes."""
     monkeypatch.setenv("STACKCHAN_LOCAL_LLM_MODEL", "test-model:q4")
 
-    async def fake_hermes(text: str, *, session_id: str | None = None) -> str:
+    async def fake_hermes(
+        text: str, *, session_id: str | None = None, on_step: Any | None = None
+    ) -> str:
         return "hermes reply"
 
     async def fail_local(text: str, *, system_prompt: str) -> str:
         raise AssertionError("local path must not be called for Hermes turns")
 
-    monkeypatch.setattr(hermes_bridge, "ask_hermes", fake_hermes)
+    monkeypatch.setattr(hermes_bridge, "ask_hermes_stream", fake_hermes)
     monkeypatch.setattr(local_llm, "ask_local", fail_local)
 
     reply, route = await hermes_bridge.generate_reply("check the weather tomorrow")
     assert (reply, route) == ("hermes reply", "hermes")
 
 
-@pytest.mark.asyncio
 async def test_generate_reply_local_failure_falls_back(monkeypatch):
     """Ollama down / timeout / bad reply → the turn survives via Hermes."""
     monkeypatch.setenv("STACKCHAN_LOCAL_LLM_MODEL", "test-model:q4")
 
-    async def fake_hermes(text: str, *, session_id: str | None = None) -> str:
+    async def fake_hermes(
+        text: str, *, session_id: str | None = None, on_step: Any | None = None
+    ) -> str:
         return "hermes reply"
 
     async def broken_local(text: str, *, system_prompt: str) -> str:
         raise RuntimeError("connection refused")
 
-    monkeypatch.setattr(hermes_bridge, "ask_hermes", fake_hermes)
+    monkeypatch.setattr(hermes_bridge, "ask_hermes_stream", fake_hermes)
     monkeypatch.setattr(local_llm, "ask_local", broken_local)
 
     reply, route = await hermes_bridge.generate_reply("good morning")
     assert (reply, route) == ("hermes reply", "hermes")
 
 
-@pytest.mark.asyncio
 async def test_generate_reply_hermes_failure_still_raises(monkeypatch):
     """A Hermes failure propagates as before — fallback only covers local."""
     monkeypatch.delenv("STACKCHAN_LOCAL_LLM_MODEL", raising=False)
 
-    async def broken_hermes(text: str, *, session_id: str | None = None) -> str:
+    async def broken_hermes(
+        text: str, *, session_id: str | None = None, on_step: Any | None = None
+    ) -> str:
         raise RuntimeError("Hermes API returned status=500")
 
-    monkeypatch.setattr(hermes_bridge, "ask_hermes", broken_hermes)
+    monkeypatch.setattr(hermes_bridge, "ask_hermes_stream", broken_hermes)
     with pytest.raises(RuntimeError, match="status=500"):
         await hermes_bridge.generate_reply("good morning")
 

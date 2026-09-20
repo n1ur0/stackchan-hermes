@@ -76,50 +76,56 @@ def test_get_gateway_singleton():
     gw_mod._gateway = None
 
 
-def test_vision_url_uses_explicit_url(monkeypatch):
-    """VISION_URL overrides host/port construction for remote tunnels."""
-    monkeypatch.setenv("VISION_URL", "https://stackchan.example.ts.net:8443/capture")
+@pytest.mark.parametrize(
+    ("has_vision_url", "expected"),
+    [
+        # VISION_URL overrides host/port construction for remote tunnels.
+        (True, "https://stackchan.example.ts.net:8443/capture"),
+        # VISION_HOST and CAPTURE_PORT still build the default LAN URL.
+        (False, "http://192.0.2.10:8766/capture"),
+    ],
+    ids=["explicit-vision-url", "lan-host-built-url"],
+)
+def test_vision_url(monkeypatch, has_vision_url, expected):
+    """VISION_URL wins when set; otherwise a LAN URL is built from host/port."""
+    if has_vision_url:
+        monkeypatch.setenv(
+            "VISION_URL", "https://stackchan.example.ts.net:8443/capture"
+        )
+    else:
+        monkeypatch.delenv("VISION_URL", raising=False)
     monkeypatch.setenv("VISION_HOST", "192.0.2.10")
     monkeypatch.setenv("CAPTURE_PORT", "8766")
 
     gw = Gateway()
 
-    assert gw.vision_url == "https://stackchan.example.ts.net:8443/capture"
+    assert gw.vision_url == expected
 
 
-def test_vision_url_uses_lan_host(monkeypatch):
-    """VISION_HOST and CAPTURE_PORT still build the default LAN capture URL."""
-    monkeypatch.delenv("VISION_URL", raising=False)
-    monkeypatch.setenv("VISION_HOST", "192.0.2.10")
-    monkeypatch.setenv("CAPTURE_PORT", "8766")
-
-    gw = Gateway()
-
-    assert gw.vision_url == "http://192.0.2.10:8766/capture"
-
-
-def test_vision_token_prefers_explicit_token(monkeypatch):
-    """VISION_TOKEN can be separated from the WebSocket token."""
-    monkeypatch.setenv("VISION_TOKEN", "capture-token")
-    monkeypatch.setenv("STACKCHAN_TOKEN", "ws-token")
-
-    gw = Gateway()
-
-    assert gw.vision_token == "capture-token"
-
-
-def test_vision_token_falls_back_to_stackchan_token(monkeypatch):
-    """Capture uploads use the gateway token by default."""
-    monkeypatch.delenv("VISION_TOKEN", raising=False)
+@pytest.mark.parametrize(
+    ("has_vision_token", "expected"),
+    [
+        # VISION_TOKEN can be separated from the WebSocket token.
+        (True, "capture-token"),
+        # Capture uploads use the gateway token by default.
+        (False, "ws-token"),
+    ],
+    ids=["explicit-vision-token", "fallback-to-ws-token"],
+)
+def test_vision_token(monkeypatch, has_vision_token, expected):
+    """VISION_TOKEN wins when set; otherwise falls back to the WS token."""
+    if has_vision_token:
+        monkeypatch.setenv("VISION_TOKEN", "capture-token")
+    else:
+        monkeypatch.delenv("VISION_TOKEN", raising=False)
     monkeypatch.setenv("STACKCHAN_TOKEN", "ws-token")
     monkeypatch.setenv("BEARER_TOKEN", "legacy-token")
 
     gw = Gateway()
 
-    assert gw.vision_token == "ws-token"
+    assert gw.vision_token == expected
 
 
-@pytest.mark.asyncio
 async def test_gateway_start_stop(monkeypatch):
     """Gateway can start and stop."""
     monkeypatch.setenv("WS_PORT", "0")  # Random port
@@ -139,7 +145,6 @@ async def test_gateway_start_stop(monkeypatch):
     assert ("esp32_stop",) in calls
 
 
-@pytest.mark.asyncio
 async def test_gateway_start_advertises_mdns_by_default(monkeypatch):
     """Gateway.start() starts mDNS advertising after listeners are ready."""
     import stackchan_mcp.gateway as gw_mod
@@ -168,7 +173,6 @@ async def test_gateway_start_advertises_mdns_by_default(monkeypatch):
     assert calls == [("start", "0.0.0.0", 0, "/"), ("stop",)]
 
 
-@pytest.mark.asyncio
 async def test_gateway_start_can_disable_mdns(monkeypatch):
     """Gateway.start(advertise_mdns=False) skips mDNS advertising."""
     import stackchan_mcp.gateway as gw_mod
@@ -190,7 +194,6 @@ async def test_gateway_start_can_disable_mdns(monkeypatch):
     await gw.stop()
 
 
-@pytest.mark.asyncio
 async def test_gateway_mdns_start_failure_does_not_abort(
     monkeypatch, caplog
 ):
@@ -220,7 +223,6 @@ async def test_gateway_mdns_start_failure_does_not_abort(
     await gw.stop()
 
 
-@pytest.mark.asyncio
 async def test_gateway_mdns_stop_failure_does_not_mask_shutdown(
     monkeypatch, caplog
 ):
@@ -261,7 +263,6 @@ def test_gateway_wires_device_ready_to_esp32():
     assert gw.voice_turn_active is False
 
 
-@pytest.mark.asyncio
 async def test_on_device_ready_applies_persisted_volume(monkeypatch):
     """The connection hook re-applies the persisted volume via control."""
     import stackchan_mcp.control as control

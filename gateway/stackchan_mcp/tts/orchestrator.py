@@ -17,11 +17,12 @@ synthesising audio with no destination.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from .audio_utils import (
     DEVICE_CHANNELS,
@@ -58,6 +59,7 @@ async def synthesize_and_send(
     *,
     gateway: "Gateway | None" = None,
     registry: EngineRegistry | None = None,
+    on_audio_ready: "Callable[..., Any] | None" = None,
 ) -> dict[str, Any]:
     """Synthesise text via a registered engine and push it to the device.
 
@@ -80,6 +82,14 @@ async def synthesize_and_send(
         registry: Engine registry to look up ``voice`` in. Defaults to
             the process-wide registry. Tests inject a fresh registry
             here to avoid leaking state across cases.
+
+        on_audio_ready: Optional callback (sync callable or awaitable)
+            invoked exactly once, right after the engine has returned
+            the synthesised PCM and before the first frame is pushed.
+            Callers use it to drive UI that must not appear until the
+            audio is actually loaded (e.g. showing the spoken reply as
+            a subtitle only when the audio is ready to play, instead of
+            while the engine is still synthesising).
 
     Returns:
         Dict describing the synthesis: ``engine``, ``text``,
@@ -166,17 +176,22 @@ async def synthesize_and_send(
     except ValueError:
         raise
     except Exception as exc:
-        raise RuntimeError(
-            f"TTS engine '{voice}' failed: {exc}"
-        ) from exc
+        raise RuntimeError(f"TTS engine '{voice}' failed: {exc}") from exc
 
     if not pcm:
         # An engine returning no PCM is a bug, not a runtime condition;
         # surface it to the caller rather than silently sending zero
         # frames (which would look like the device "ignored" the call).
-        raise RuntimeError(
-            f"Engine '{voice}' produced no PCM data for the given text."
-        )
+        raise RuntimeError(f"Engine '{voice}' produced no PCM data for the given text.")
+
+    # UI callback: the audio is now loaded (synthesised, validated) and
+    # about to be handed to the push pipeline. Fire it before the first
+    # frame is sent so display updates (subtitle, status) land exactly
+    # when playback starts, not seconds earlier during synthesis.
+    if on_audio_ready is not None:
+        result = on_audio_ready()
+        if inspect.isawaitable(result):
+            await result
 
     # Hand the PCM off to the shared encode-and-push path. Engines that
     # have already resampled to DEVICE_SAMPLE_RATE (the documented
@@ -277,9 +292,7 @@ async def send_pcm_audio(
         )
 
     if not gateway.esp32.device_connected:
-        raise RuntimeError(
-            "No ESP32 device connected; cannot deliver audio."
-        )
+        raise RuntimeError("No ESP32 device connected; cannot deliver audio.")
 
     # WebSocket protocol version gate. The firmware decodes raw Opus
     # binary frames only on protocol v1; v2/v3 wrap each binary message
@@ -455,9 +468,7 @@ async def send_pcm_stream(
         )
 
     if not gateway.esp32.device_connected:
-        raise RuntimeError(
-            "No ESP32 device connected; cannot deliver streamed audio."
-        )
+        raise RuntimeError("No ESP32 device connected; cannot deliver streamed audio.")
 
     # WebSocket protocol version gate (same reasoning as send_pcm_audio).
     connection = getattr(gateway.esp32, "connection", None)
@@ -483,9 +494,7 @@ async def send_pcm_stream(
             "'pip install stackchan-mcp[tts]' to enable streamed audio."
         ) from exc
 
-    samples_per_frame = (
-        DEVICE_SAMPLE_RATE * DEVICE_FRAME_DURATION_MS // 1000
-    )
+    samples_per_frame = DEVICE_SAMPLE_RATE * DEVICE_FRAME_DURATION_MS // 1000
     bytes_per_frame = samples_per_frame * 2  # 16-bit
     # Number of source-rate samples that produce exactly one device-rate
     # opus frame after resampling. When the input is already at the device
@@ -493,9 +502,7 @@ async def send_pcm_stream(
     # no-op; otherwise we drain whole source-rate frames into the
     # resampler, which avoids the rounding-error and odd-byte issues that
     # per-chunk resampling has when transport chunk sizes are arbitrary.
-    src_samples_per_frame = (
-        source_rate * DEVICE_FRAME_DURATION_MS // 1000
-    )
+    src_samples_per_frame = source_rate * DEVICE_FRAME_DURATION_MS // 1000
     if src_samples_per_frame <= 0:
         raise RuntimeError(
             f"source_rate {source_rate} is too low for "
@@ -601,13 +608,9 @@ async def send_pcm_stream(
                     else:
                         pcm_frame = src_frame
                     try:
-                        opus_frame = encoder.encode(
-                            pcm_frame, samples_per_frame
-                        )
+                        opus_frame = encoder.encode(pcm_frame, samples_per_frame)
                     except Exception as exc:
-                        raise RuntimeError(
-                            f"Opus encoding failed: {exc}"
-                        ) from exc
+                        raise RuntimeError(f"Opus encoding failed: {exc}") from exc
 
                     if not await _push(opus_frame):
                         break  # device disconnected mid-stream
@@ -640,19 +643,13 @@ async def send_pcm_stream(
                         if len(tail) > bytes_per_frame:
                             tail = tail[:bytes_per_frame]
                         elif len(tail) < bytes_per_frame:
-                            tail = tail + b"\x00" * (
-                                bytes_per_frame - len(tail)
-                            )
+                            tail = tail + b"\x00" * (bytes_per_frame - len(tail))
                     else:
                         tail = tail_src
                     try:
-                        opus_frame = encoder.encode(
-                            tail, samples_per_frame
-                        )
+                        opus_frame = encoder.encode(tail, samples_per_frame)
                     except Exception as exc:
-                        raise RuntimeError(
-                            f"Opus encoding failed: {exc}"
-                        ) from exc
+                        raise RuntimeError(f"Opus encoding failed: {exc}") from exc
                     await _push(opus_frame)
         finally:
             try:

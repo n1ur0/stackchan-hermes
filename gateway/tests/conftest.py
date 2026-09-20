@@ -1,5 +1,7 @@
 """Pytest configuration."""
 
+import inspect
+
 import pytest
 
 
@@ -27,4 +29,9 @@ def pytest_collection_modifyitems(config, items):
 
 def asyncio_test(item):
     """Check if test is async."""
-    return hasattr(item, "function") and hasattr(item.function, "__wrapped__")
+    if not hasattr(item, "function"):
+        return False
+    fn = item.function
+    # Handle parametrized/coroutine-wrapper cases first.
+    unwrapped = inspect.unwrap(fn) if hasattr(fn, "__wrapped__") else fn
+    return inspect.iscoroutinefunction(unwrapped)

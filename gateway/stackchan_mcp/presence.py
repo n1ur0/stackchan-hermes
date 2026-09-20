@@ -72,6 +72,7 @@ from typing import TYPE_CHECKING, Any
 from . import presence_report, sensors
 from .event_log import rotate_old_entries
 from .heartbeat import is_quiet, parse_quiet_hours
+from .statefile import atomic_write_text, env_path, env_path_or_default
 
 if TYPE_CHECKING:
     from .gateway import Gateway
@@ -84,9 +85,7 @@ logger = logging.getLogger(__name__)
 #: the proactive speaker to react to meaningful transitions (e.g. a
 #: returning resident or a morning wake), keeping observation mechanical
 #: in the gateway and the wording in Hermes.
-StateChangeCb = Callable[
-    ["PresenceState", "PresenceState"], Awaitable[None] | None
-]
+StateChangeCb = Callable[["PresenceState", "PresenceState"], Awaitable[None] | None]
 
 #: Persisted threshold file. Overridable for tests via the env var.
 DEFAULT_STATE_PATH = "~/.stackchan/presence_state.json"
@@ -176,9 +175,7 @@ class PresenceState(str, Enum):
 
 
 def _state_path() -> Path:
-    return Path(
-        os.getenv("STACKCHAN_PRESENCE_STATE", "") or DEFAULT_STATE_PATH
-    ).expanduser()
+    return env_path_or_default("STACKCHAN_PRESENCE_STATE", DEFAULT_STATE_PATH)
 
 
 def _resolve_log_path() -> Path | None:
@@ -189,13 +186,7 @@ def _resolve_log_path() -> Path | None:
     - Empty or ``"off"`` -> None (disabled).
     - Any other value -> that path (``~`` expanded).
     """
-    raw = os.getenv("STACKCHAN_PRESENCE_LOG")
-    if raw is None:
-        return Path(DEFAULT_LOG_PATH).expanduser()
-    stripped = raw.strip()
-    if not stripped or stripped.lower() == "off":
-        return None
-    return Path(stripped).expanduser()
+    return env_path("STACKCHAN_PRESENCE_LOG", DEFAULT_LOG_PATH, blank_as_disabled=True)
 
 
 def _resolve_report_dir() -> Path | None:
@@ -206,26 +197,12 @@ def _resolve_report_dir() -> Path | None:
     caller additionally gates this on the log being enabled (a report
     without a log has no data to aggregate).
     """
-    raw = os.getenv("STACKCHAN_PRESENCE_REPORT")
-    if raw is None:
-        return Path(DEFAULT_REPORT_DIR).expanduser()
-    stripped = raw.strip()
-    if not stripped or stripped.lower() == "off":
-        return None
-    return Path(stripped).expanduser()
+    return env_path("STACKCHAN_PRESENCE_REPORT", DEFAULT_REPORT_DIR, blank_as_disabled=True)
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` atomically (write-temp + os.replace)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fp:
-            fp.write(text)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+    atomic_write_text(path, text)
 
 
 def _clamp_absent_after(value: Any) -> int:
@@ -276,7 +253,8 @@ def save_config(config: dict[str, Any]) -> None:
     path = _state_path()
     payload = {
         "absent_after_s": _clamp_absent_after(config.get("absent_after_s")),
-        "sleep_window": _valid_window(config.get("sleep_window")) or DEFAULT_SLEEP_WINDOW,
+        "sleep_window": _valid_window(config.get("sleep_window"))
+        or DEFAULT_SLEEP_WINDOW,
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -652,9 +630,7 @@ class PresenceMonitor:
             "last_seen_s_ago": self._last_seen_s_ago(),
             # object_raw augmentation (lets us tune margins from the log).
             "obj_baseline": (
-                round(self._obj_baseline, 1)
-                if self._obj_baseline is not None
-                else None
+                round(self._obj_baseline, 1) if self._obj_baseline is not None else None
             ),
             "obj_armed": self._obj_armed,
             "static_present": self._last_static_present,

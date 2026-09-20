@@ -22,22 +22,23 @@ from __future__ import annotations
 import logging
 from typing import Iterable
 
+from .. import audio_common as _audio_common
+
 logger = logging.getLogger(__name__)
 
 
 #: Opus sample rate the device encoder is configured for.
-DEVICE_SAMPLE_RATE = 16000
+DEVICE_SAMPLE_RATE = _audio_common.DEVICE_SAMPLE_RATE
 
 #: Opus channel count (mono).
-DEVICE_CHANNELS = 1
+DEVICE_CHANNELS = _audio_common.DEVICE_CHANNELS
 
 #: Opus frame duration in milliseconds (matches the firmware's
-#: ``OPUS_FRAME_DURATION_MS``). Kept symmetric with
-#: :data:`stackchan_mcp.tts.audio_utils.DEVICE_FRAME_DURATION_MS`.
-DEVICE_FRAME_DURATION_MS = 60
+#: ``OPUS_FRAME_DURATION_MS``). Shared with :mod:`stackchan_mcp.tts.audio_utils`.
+DEVICE_FRAME_DURATION_MS = _audio_common.DEVICE_FRAME_DURATION_MS
 
 #: PCM samples per Opus frame at the device's settings (= 960).
-SAMPLES_PER_FRAME = DEVICE_SAMPLE_RATE * DEVICE_FRAME_DURATION_MS // 1000
+SAMPLES_PER_FRAME = _audio_common.SAMPLES_PER_FRAME
 
 
 def decode_opus_frames(

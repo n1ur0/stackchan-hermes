@@ -206,7 +206,6 @@ def test_multiturn_survives_other_state_writes(monkeypatch):
 # ---- set_volume -------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_set_volume_sends_and_persists():
     gw = FakeGateway()
     result = await control.set_volume(gw, 80)
@@ -215,7 +214,6 @@ async def test_set_volume_sends_and_persists():
     assert control.load_state()["volume"] == 80
 
 
-@pytest.mark.asyncio
 async def test_set_volume_clears_mute():
     gw = FakeGateway()
     control.save_state({"volume": 0, "muted": True, "pre_mute_volume": 60})
@@ -227,14 +225,12 @@ async def test_set_volume_clears_mute():
     assert state["pre_mute_volume"] == 40
 
 
-@pytest.mark.asyncio
 async def test_set_volume_clamps():
     gw = FakeGateway()
     result = await control.set_volume(gw, 150)
     assert result["volume"] == 100
 
 
-@pytest.mark.asyncio
 async def test_set_volume_device_failure_does_not_persist():
     gw = FakeGateway(fail=True)
     result = await control.set_volume(gw, 80)
@@ -246,7 +242,6 @@ async def test_set_volume_device_failure_does_not_persist():
 # ---- mute / unmute ----------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_mute_stashes_volume_and_sets_zero():
     gw = FakeGateway()
     await control.set_volume(gw, 65)
@@ -260,7 +255,6 @@ async def test_mute_stashes_volume_and_sets_zero():
     assert state["pre_mute_volume"] == 65
 
 
-@pytest.mark.asyncio
 async def test_unmute_restores_stashed_volume():
     gw = FakeGateway()
     await control.set_volume(gw, 65)
@@ -274,7 +268,6 @@ async def test_unmute_restores_stashed_volume():
     assert state["volume"] == 65
 
 
-@pytest.mark.asyncio
 async def test_mute_twice_keeps_original_pre_mute_volume():
     gw = FakeGateway()
     await control.set_volume(gw, 70)
@@ -284,7 +277,6 @@ async def test_mute_twice_keeps_original_pre_mute_volume():
     assert control.load_state()["pre_mute_volume"] == 70
 
 
-@pytest.mark.asyncio
 async def test_concurrent_mute_unmute_preserve_pre_mute_volume():
     # mute/unmute do a read-modify-write under _mute_lock; firing them
     # concurrently must not stash 0 into pre_mute_volume and lose the
@@ -300,16 +292,68 @@ async def test_concurrent_mute_unmute_preserve_pre_mute_volume():
 # ---- apply_persisted_volume ------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_apply_persisted_volume_reapplies(monkeypatch):
+
+# Volume / mic_gain / brightness all persist a scalar and re-apply it on
+# startup. The three families share the same "reapplies / retries on
+# failure / skips when disconnected" contract, so they live in one table.
+# Special cases that have extra behaviour stay as dedicated tests below.
+_APPLY_FAMILIES = [
+    {
+        "name": "volume",
+        "state": {"volume": 42, "muted": False, "pre_mute_volume": 42},
+        "call": "self.audio_speaker.set_volume",
+        "kwargs": {"volume": 42},
+        "apply": "apply_persisted_volume",
+        "retries": True,
+    },
+    {
+        "name": "mic_gain",
+        "state": {"volume": 50, "muted": False, "pre_mute_volume": 50, "mic_gain": 22},
+        "call": "self.audio_speaker.set_mic_gain",
+        "kwargs": {"gain": 22},
+        "apply": "apply_persisted_mic_gain",
+        "retries": True,
+    },
+    {
+        "name": "brightness",
+        "state": {"brightness": 33},
+        "call": "self.screen.set_brightness",
+        "kwargs": {"brightness": 33},
+        "apply": "apply_persisted_brightness",
+        "retries": False,
+    },
+]
+
+
+@pytest.mark.parametrize("family", _APPLY_FAMILIES, ids=lambda f: f["name"])
+async def test_apply_persisted_reapplies(monkeypatch, family):
     monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
     gw = FakeGateway()
-    control.save_state({"volume": 42, "muted": False, "pre_mute_volume": 42})
-    await control.apply_persisted_volume(gw)
-    assert ("self.audio_speaker.set_volume", {"volume": 42}) in gw.esp32.calls
+    control.save_state(family["state"])
+    await getattr(control, family["apply"])(gw)
+    assert (family["call"], family["kwargs"]) in gw.esp32.calls
 
 
-@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "family", [f for f in _APPLY_FAMILIES if f["retries"]], ids=lambda f: f["name"]
+)
+async def test_apply_persisted_retries_on_failure(monkeypatch, family):
+    monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
+    gw = FakeGateway(fail=True)
+    control.save_state(family["state"])
+    await getattr(control, family["apply"])(gw)
+    # Initial attempt + one retry = 2 calls.
+    assert len(gw.esp32.calls) == control._APPLY_VOLUME_RETRIES + 1
+
+
+@pytest.mark.parametrize("family", _APPLY_FAMILIES, ids=lambda f: f["name"])
+async def test_apply_persisted_skips_when_disconnected(monkeypatch, family):
+    monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
+    gw = FakeGateway(connected=False)
+    await getattr(control, family["apply"])(gw)
+    assert gw.esp32.calls == []
+
+
 async def test_apply_persisted_volume_muted_applies_zero(monkeypatch):
     monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
     gw = FakeGateway()
@@ -318,28 +362,11 @@ async def test_apply_persisted_volume_muted_applies_zero(monkeypatch):
     assert ("self.audio_speaker.set_volume", {"volume": 0}) in gw.esp32.calls
 
 
-@pytest.mark.asyncio
-async def test_apply_persisted_volume_retries_on_failure(monkeypatch):
-    monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
-    gw = FakeGateway(fail=True)
-    control.save_state({"volume": 42, "muted": False, "pre_mute_volume": 42})
-    await control.apply_persisted_volume(gw)
-    # Initial attempt + one retry = 2 calls.
-    assert len(gw.esp32.calls) == control._APPLY_VOLUME_RETRIES + 1
-
-
-@pytest.mark.asyncio
-async def test_apply_persisted_volume_skips_when_disconnected(monkeypatch):
-    monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
-    gw = FakeGateway(connected=False)
-    await control.apply_persisted_volume(gw)
-    assert gw.esp32.calls == []
 
 
 # ---- set_device_status_text ------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_set_status_text_sends_when_connected():
     gw = FakeGateway()
     await control.set_device_status_text(gw, "Thinking...")
@@ -348,14 +375,12 @@ async def test_set_status_text_sends_when_connected():
     ]
 
 
-@pytest.mark.asyncio
 async def test_set_status_text_noop_when_disconnected():
     gw = FakeGateway(connected=False)
     await control.set_device_status_text(gw, "Thinking...")
     assert gw.esp32.calls == []
 
 
-@pytest.mark.asyncio
 async def test_set_status_text_swallows_device_error():
     gw = FakeGateway(fail=True)
     # Must not raise even when the device tool errors (old firmware).
@@ -363,7 +388,6 @@ async def test_set_status_text_swallows_device_error():
     assert gw.esp32.calls  # it tried
 
 
-@pytest.mark.asyncio
 async def test_set_status_text_swallows_exception(monkeypatch):
     gw = FakeGateway()
 
@@ -378,7 +402,6 @@ async def test_set_status_text_swallows_exception(monkeypatch):
 # ---- trigger_listen ---------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_trigger_listen_sends_start(monkeypatch):
     import stackchan_mcp.audio_stream as audio_stream
 
@@ -389,7 +412,6 @@ async def test_trigger_listen_sends_start(monkeypatch):
     assert gw.esp32.listen_calls == [("start", "manual")]
 
 
-@pytest.mark.asyncio
 async def test_trigger_listen_already_recording(monkeypatch):
     import stackchan_mcp.audio_stream as audio_stream
 
@@ -400,7 +422,6 @@ async def test_trigger_listen_already_recording(monkeypatch):
     assert gw.esp32.listen_calls == []
 
 
-@pytest.mark.asyncio
 async def test_trigger_listen_no_device():
     gw = FakeGateway(connected=False)
     result = await control.trigger_listen(gw)
@@ -410,7 +431,6 @@ async def test_trigger_listen_no_device():
 # ---- Phase F extras: subtitle / route badge / LED indicator ----------
 
 
-@pytest.mark.asyncio
 async def test_set_subtitle_sends_when_connected():
     gw = FakeGateway()
     await control.set_device_subtitle(gw, "hello")
@@ -419,35 +439,30 @@ async def test_set_subtitle_sends_when_connected():
     ]
 
 
-@pytest.mark.asyncio
 async def test_set_subtitle_noop_when_disconnected():
     gw = FakeGateway(connected=False)
     await control.set_device_subtitle(gw, "x")
     assert gw.esp32.calls == []
 
 
-@pytest.mark.asyncio
 async def test_set_subtitle_swallows_device_error():
     gw = FakeGateway(fail=True)
     await control.set_device_subtitle(gw, "x")  # must not raise
     assert gw.esp32.calls  # it tried
 
 
-@pytest.mark.asyncio
 async def test_set_route_badge_sends():
     gw = FakeGateway()
     await control.set_device_route_badge(gw, "H")
     assert gw.esp32.calls == [("self.display.set_route_badge", {"text": "H"})]
 
 
-@pytest.mark.asyncio
 async def test_set_route_badge_noop_when_disconnected():
     gw = FakeGateway(connected=False)
     await control.set_device_route_badge(gw, "H")
     assert gw.esp32.calls == []
 
 
-@pytest.mark.asyncio
 async def test_set_led_indicator_sends_rgb():
     gw = FakeGateway()
     await control.set_device_led_indicator(gw, 0, 0, 32)
@@ -456,7 +471,6 @@ async def test_set_led_indicator_sends_rgb():
     ]
 
 
-@pytest.mark.asyncio
 async def test_set_led_indicator_clear_is_zero():
     gw = FakeGateway()
     await control.set_device_led_indicator(gw, 0, 0, 0)
@@ -465,7 +479,6 @@ async def test_set_led_indicator_clear_is_zero():
     ]
 
 
-@pytest.mark.asyncio
 async def test_set_led_indicator_swallows_exception(monkeypatch):
     gw = FakeGateway()
 
@@ -487,7 +500,6 @@ def _clear_conversation():
     control._CONVERSATION.clear()
 
 
-@pytest.mark.asyncio
 async def test_set_mic_gain_sends_and_persists():
     gw = FakeGateway()
     result = await control.set_mic_gain(gw, 24)
@@ -496,7 +508,6 @@ async def test_set_mic_gain_sends_and_persists():
     assert control.load_state()["mic_gain"] == 24
 
 
-@pytest.mark.asyncio
 async def test_set_mic_gain_clamps_high():
     gw = FakeGateway()
     result = await control.set_mic_gain(gw, 999)
@@ -505,7 +516,6 @@ async def test_set_mic_gain_clamps_high():
     assert control.load_state()["mic_gain"] == 36
 
 
-@pytest.mark.asyncio
 async def test_set_mic_gain_clamps_low():
     gw = FakeGateway()
     result = await control.set_mic_gain(gw, -5)
@@ -513,7 +523,6 @@ async def test_set_mic_gain_clamps_low():
     assert control.load_state()["mic_gain"] == 0
 
 
-@pytest.mark.asyncio
 async def test_set_mic_gain_device_failure_does_not_persist():
     gw = FakeGateway(fail=True)
     result = await control.set_mic_gain(gw, 20)
@@ -521,7 +530,6 @@ async def test_set_mic_gain_device_failure_does_not_persist():
     assert control.load_state()["mic_gain"] == control.DEFAULT_MIC_GAIN
 
 
-@pytest.mark.asyncio
 async def test_set_mic_gain_preserves_volume_state():
     gw = FakeGateway()
     await control.set_volume(gw, 80)
@@ -531,40 +539,12 @@ async def test_set_mic_gain_preserves_volume_state():
     assert state["mic_gain"] == 12
 
 
-@pytest.mark.asyncio
-async def test_apply_persisted_mic_gain_reapplies(monkeypatch):
-    monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
-    gw = FakeGateway()
-    control.save_state(
-        {"volume": 50, "muted": False, "pre_mute_volume": 50, "mic_gain": 22}
-    )
-    await control.apply_persisted_mic_gain(gw)
-    assert ("self.audio_speaker.set_mic_gain", {"gain": 22}) in gw.esp32.calls
 
-
-@pytest.mark.asyncio
-async def test_apply_persisted_mic_gain_retries_on_failure(monkeypatch):
-    monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
-    gw = FakeGateway(fail=True)
-    control.save_state(
-        {"volume": 50, "muted": False, "pre_mute_volume": 50, "mic_gain": 22}
-    )
-    await control.apply_persisted_mic_gain(gw)
-    assert len(gw.esp32.calls) == control._APPLY_VOLUME_RETRIES + 1
-
-
-@pytest.mark.asyncio
-async def test_apply_persisted_mic_gain_skips_when_disconnected(monkeypatch):
-    monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
-    gw = FakeGateway(connected=False)
-    await control.apply_persisted_mic_gain(gw)
-    assert gw.esp32.calls == []
 
 
 # ---- brightness -------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_set_brightness_sends_and_persists():
     gw = FakeGateway()
     result = await control.set_brightness(gw, 40)
@@ -573,7 +553,6 @@ async def test_set_brightness_sends_and_persists():
     assert control.load_state()["brightness"] == 40
 
 
-@pytest.mark.asyncio
 async def test_set_brightness_clamps_out_of_range():
     gw = FakeGateway()
     assert (await control.set_brightness(gw, 999))["brightness"] == 100
@@ -581,7 +560,6 @@ async def test_set_brightness_clamps_out_of_range():
     assert control.load_state()["brightness"] == 0
 
 
-@pytest.mark.asyncio
 async def test_set_brightness_device_failure_does_not_persist():
     gw = FakeGateway(fail=True)
     result = await control.set_brightness(gw, 20)
@@ -589,21 +567,6 @@ async def test_set_brightness_device_failure_does_not_persist():
     assert control.load_state()["brightness"] == control.DEFAULT_BRIGHTNESS
 
 
-@pytest.mark.asyncio
-async def test_apply_persisted_brightness_reapplies(monkeypatch):
-    monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
-    gw = FakeGateway()
-    control.save_state({"brightness": 33})
-    await control.apply_persisted_brightness(gw)
-    assert ("self.screen.set_brightness", {"brightness": 33}) in gw.esp32.calls
-
-
-@pytest.mark.asyncio
-async def test_apply_persisted_brightness_skips_when_disconnected(monkeypatch):
-    monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
-    gw = FakeGateway(connected=False)
-    await control.apply_persisted_brightness(gw)
-    assert gw.esp32.calls == []
 
 
 # ---- LED (3 slots: idle / listening / hermes) ------------------------
@@ -632,7 +595,6 @@ def test_led_backward_compat_flat_migrates_to_idle(monkeypatch, tmp_path):
     assert led["hermes"] == control.DEFAULT_LED["hermes"]
 
 
-@pytest.mark.asyncio
 async def test_set_led_idle_on_uses_set_all_and_persists():
     gw = FakeGateway()
     result = await control.set_led(gw, "idle", on=True, r=10, g=20, b=30)
@@ -642,7 +604,6 @@ async def test_set_led_idle_on_uses_set_all_and_persists():
     assert control.load_state()["led"]["idle"] == {"on": True, "r": 10, "g": 20, "b": 30}
 
 
-@pytest.mark.asyncio
 async def test_set_led_idle_off_clears_but_keeps_colour():
     gw = FakeGateway()
     result = await control.set_led(gw, "idle", on=False, r=10, g=20, b=30)
@@ -650,7 +611,6 @@ async def test_set_led_idle_off_clears_but_keeps_colour():
     assert gw.esp32.calls == [("self.led.clear", {})]
 
 
-@pytest.mark.asyncio
 async def test_set_led_idle_skips_device_when_voice_turn_active():
     gw = FakeGateway()
     gw.voice_turn_active = True  # a turn owns the LED right now
@@ -660,7 +620,6 @@ async def test_set_led_idle_skips_device_when_voice_turn_active():
     assert control.load_state()["led"]["idle"]["on"] is True
 
 
-@pytest.mark.asyncio
 async def test_set_led_listening_persists_without_device_call():
     gw = FakeGateway()
     result = await control.set_led(gw, "listening", r=5, g=6, b=7)
@@ -669,21 +628,18 @@ async def test_set_led_listening_persists_without_device_call():
     assert control.load_state()["led"]["listening"] == {"r": 5, "g": 6, "b": 7}
 
 
-@pytest.mark.asyncio
 async def test_set_led_rejects_unknown_slot():
     gw = FakeGateway()
     result = await control.set_led(gw, "nope", on=True, r=1, g=2, b=3)
     assert result["ok"] is False
 
 
-@pytest.mark.asyncio
 async def test_set_led_clamps_rgb():
     gw = FakeGateway()
     result = await control.set_led(gw, "hermes", r=999, g=-5, b=256)
     assert result["led"]["hermes"] == {"r": 255, "g": 0, "b": 255}
 
 
-@pytest.mark.asyncio
 async def test_set_led_idle_device_failure_does_not_persist():
     gw = FakeGateway(fail=True)
     result = await control.set_led(gw, "idle", on=True, r=10, g=20, b=30)
@@ -691,7 +647,6 @@ async def test_set_led_idle_device_failure_does_not_persist():
     assert control.load_state()["led"] == control.DEFAULT_LED
 
 
-@pytest.mark.asyncio
 async def test_apply_led_state_idle_on_lights_colour():
     gw = FakeGateway()
     control.save_state({"led": {"idle": {"on": True, "r": 1, "g": 2, "b": 3}}})
@@ -699,21 +654,18 @@ async def test_apply_led_state_idle_on_lights_colour():
     assert gw.esp32.calls == [("self.led.set_all", {"r": 1, "g": 2, "b": 3})]
 
 
-@pytest.mark.asyncio
 async def test_apply_led_state_idle_off_clears():
     gw = FakeGateway()
     await control.apply_led_state(gw, "idle")  # default idle off
     assert gw.esp32.calls == [("self.led.clear", {})]
 
 
-@pytest.mark.asyncio
 async def test_apply_led_state_listening_lights_colour():
     gw = FakeGateway()
     await control.apply_led_state(gw, "listening")
     assert gw.esp32.calls == [("self.led.set_all", {"r": 0, "g": 210, "b": 90})]
 
 
-@pytest.mark.asyncio
 async def test_set_led_brightness_scales_live_idle_and_persists():
     gw = FakeGateway()
     await control.set_led(gw, "idle", on=True, r=100, g=200, b=50)
@@ -725,7 +677,6 @@ async def test_set_led_brightness_scales_live_idle_and_persists():
     assert ("self.led.set_all", {"r": 50, "g": 100, "b": 25}) in gw.esp32.calls
 
 
-@pytest.mark.asyncio
 async def test_led_brightness_scales_apply_led_state():
     gw = FakeGateway()
     control.save_state(
@@ -735,14 +686,12 @@ async def test_led_brightness_scales_apply_led_state():
     assert gw.esp32.calls == [("self.led.set_all", {"r": 0, "g": 100, "b": 50})]
 
 
-@pytest.mark.asyncio
 async def test_set_led_brightness_clamps():
     gw = FakeGateway()
     assert (await control.set_led_brightness(gw, 999))["brightness"] == 100
     assert (await control.set_led_brightness(gw, -5))["brightness"] == 0
 
 
-@pytest.mark.asyncio
 async def test_apply_led_state_swallows_exception(monkeypatch):
     gw = FakeGateway()
 
@@ -753,7 +702,6 @@ async def test_apply_led_state_swallows_exception(monkeypatch):
     await control.apply_led_state(gw, "hermes")  # must not raise
 
 
-@pytest.mark.asyncio
 async def test_apply_persisted_led_reapplies_when_idle_on(monkeypatch):
     monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
     gw = FakeGateway()
@@ -762,7 +710,6 @@ async def test_apply_persisted_led_reapplies_when_idle_on(monkeypatch):
     assert ("self.led.set_all", {"r": 1, "g": 2, "b": 3}) in gw.esp32.calls
 
 
-@pytest.mark.asyncio
 async def test_apply_persisted_led_noop_when_idle_off(monkeypatch):
     monkeypatch.setattr(control, "_APPLY_VOLUME_DELAY_S", 0)
     gw = FakeGateway()
@@ -770,7 +717,6 @@ async def test_apply_persisted_led_noop_when_idle_off(monkeypatch):
     assert gw.esp32.calls == []
 
 
-@pytest.mark.asyncio
 async def test_preview_led_flashes_then_reverts_to_idle(monkeypatch):
     monkeypatch.setattr(control, "LED_PREVIEW_SECONDS", 0)
     gw = FakeGateway()
@@ -783,7 +729,6 @@ async def test_preview_led_flashes_then_reverts_to_idle(monkeypatch):
     ]
 
 
-@pytest.mark.asyncio
 async def test_preview_led_refused_during_voice_turn():
     gw = FakeGateway()
     gw.voice_turn_active = True
@@ -792,14 +737,12 @@ async def test_preview_led_refused_during_voice_turn():
     assert gw.esp32.calls == []
 
 
-@pytest.mark.asyncio
 async def test_preview_led_no_device():
     gw = FakeGateway(connected=False)
     result = await control.preview_led(gw, "hermes")
     assert result["ok"] is False
 
 
-@pytest.mark.asyncio
 async def test_restore_idle_led_is_apply_idle():
     gw = FakeGateway()
     control.save_state({"led": {"idle": {"on": True, "r": 7, "g": 8, "b": 9}}})
@@ -810,7 +753,6 @@ async def test_restore_idle_led_is_apply_idle():
 # ---- set_head_angle ---------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_set_head_angle_sends_clamped():
     gw = FakeGateway()
     result = await control.set_head_angle(gw, 30, 60)
@@ -820,7 +762,6 @@ async def test_set_head_angle_sends_clamped():
     ]
 
 
-@pytest.mark.asyncio
 async def test_set_head_angle_clamps_out_of_range():
     gw = FakeGateway()
     result = await control.set_head_angle(gw, 200, 1)
@@ -831,14 +772,12 @@ async def test_set_head_angle_clamps_out_of_range():
     ]
 
 
-@pytest.mark.asyncio
 async def test_set_head_angle_clamps_low_yaw_high_pitch():
     gw = FakeGateway()
     result = await control.set_head_angle(gw, -200, 999)
     assert result == {"ok": True, "yaw": -90, "pitch": 85, "connected": True}
 
 
-@pytest.mark.asyncio
 async def test_set_head_angle_disconnected():
     gw = FakeGateway(connected=False)
     result = await control.set_head_angle(gw, 0, 30)
@@ -852,7 +791,6 @@ async def test_set_head_angle_disconnected():
     assert gw.esp32.calls == []
 
 
-@pytest.mark.asyncio
 async def test_set_head_angle_device_failure():
     gw = FakeGateway(fail=True)
     result = await control.set_head_angle(gw, 10, 40)
@@ -868,7 +806,6 @@ async def test_set_head_angle_device_failure():
 # ---- set_neutral_pose -------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_set_neutral_pose_sends_clamped():
     gw = FakeGateway()
     result = await control.set_neutral_pose(gw, -20, 50)
@@ -878,14 +815,12 @@ async def test_set_neutral_pose_sends_clamped():
     ]
 
 
-@pytest.mark.asyncio
 async def test_set_neutral_pose_clamps_out_of_range():
     gw = FakeGateway()
     result = await control.set_neutral_pose(gw, 999, 0)
     assert result == {"ok": True, "yaw": 90, "pitch": 5, "connected": True}
 
 
-@pytest.mark.asyncio
 async def test_set_neutral_pose_disconnected():
     gw = FakeGateway(connected=False)
     result = await control.set_neutral_pose(gw, 0, 30)
@@ -899,7 +834,6 @@ async def test_set_neutral_pose_disconnected():
     assert gw.esp32.calls == []
 
 
-@pytest.mark.asyncio
 async def test_set_neutral_pose_device_failure():
     gw = FakeGateway(fail=True)
     result = await control.set_neutral_pose(gw, 5, 45)
@@ -1010,7 +944,6 @@ class _FakeRunner:
         self.set_calls.append(bool(enabled))
 
 
-@pytest.mark.asyncio
 async def test_save_preset_writes_sanitized_file(tmp_path):
     result = await control.save_preset("sleep", _sample_snapshot())
     assert result == {"ok": True, "preset": "sleep"}
@@ -1026,14 +959,12 @@ async def test_save_preset_writes_sanitized_file(tmp_path):
     assert "neutral_pose" not in settings
 
 
-@pytest.mark.asyncio
 async def test_save_preset_rejects_unsafe_name():
     for bad in ("", "   ", "../evil", "a/b", "a\\b", ".", "..", ".hidden", "x" * 33):
         result = await control.save_preset(bad, _sample_snapshot())
         assert result["ok"] is False, bad
 
 
-@pytest.mark.asyncio
 async def test_save_preset_no_overwrite_then_overwrite():
     first = await control.save_preset("m", _sample_snapshot())
     assert first["ok"] is True
@@ -1044,7 +975,6 @@ async def test_save_preset_no_overwrite_then_overwrite():
     assert forced["ok"] is True
 
 
-@pytest.mark.asyncio
 async def test_list_and_delete_presets():
     await control.save_preset("a", _sample_snapshot())
     await control.save_preset("b", _sample_snapshot())
@@ -1058,12 +988,10 @@ async def test_list_and_delete_presets():
     assert "not found" in missing["error"]
 
 
-@pytest.mark.asyncio
 async def test_list_presets_empty_when_dir_missing():
     assert await control.list_presets() == []
 
 
-@pytest.mark.asyncio
 async def test_apply_preset_resends_settings_and_restores_state():
     gw = FakeGateway()
     gw._heartbeat = _FakeRunner(gestures=False)
@@ -1095,7 +1023,6 @@ async def test_apply_preset_resends_settings_and_restores_state():
     assert gw._heartbeat.gestures_enabled is True
 
 
-@pytest.mark.asyncio
 async def test_apply_preset_muted_restores_mute_state():
     gw = FakeGateway()
     snap = _sample_snapshot()
@@ -1111,7 +1038,6 @@ async def test_apply_preset_muted_restores_mute_state():
     assert state["pre_mute_volume"] == 55
 
 
-@pytest.mark.asyncio
 async def test_apply_preset_not_found():
     gw = FakeGateway()
     result = await control.apply_preset(gw, "nope")
@@ -1119,7 +1045,6 @@ async def test_apply_preset_not_found():
     assert "not found" in result["error"]
 
 
-@pytest.mark.asyncio
 async def test_apply_preset_refused_during_voice_turn():
     gw = FakeGateway()
     gw.voice_turn_active = True
@@ -1129,7 +1054,6 @@ async def test_apply_preset_refused_during_voice_turn():
     assert "busy" in result["error"]
 
 
-@pytest.mark.asyncio
 async def test_apply_preset_reports_device_failures():
     gw = FakeGateway(fail=True)
     await control.save_preset("scene", _sample_snapshot())

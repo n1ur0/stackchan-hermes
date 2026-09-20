@@ -164,6 +164,15 @@ def _iter_ifaddr_ipv4_addresses() -> list[tuple[str, int | None]]:
     return addresses
 
 
+def _getaddrinfo_ipv4(host: str) -> list[str]:
+    """IPv4 addresses socket resolution returns for ``host`` ([] on failure)."""
+    try:
+        infos = socket.getaddrinfo(host, None, socket.AF_INET)
+    except socket.gaierror:
+        return []
+    return [str(sockaddr[0]) for *_unused, sockaddr in infos]
+
+
 def _iter_socket_ipv4_addresses() -> list[tuple[str, int | None]]:
     """Enumerate host IPv4 addresses via socket resolution.
 
@@ -175,12 +184,7 @@ def _iter_socket_ipv4_addresses() -> list[tuple[str, int | None]]:
     hostnames = {socket.gethostname(), socket.getfqdn()}
 
     for hostname in hostnames:
-        try:
-            infos = socket.getaddrinfo(hostname, None, socket.AF_INET)
-        except socket.gaierror:
-            continue
-        for _family, _socktype, _proto, _canonname, sockaddr in infos:
-            addresses.add(sockaddr[0])
+        addresses.update(_getaddrinfo_ipv4(hostname))
 
     # Add the primary outbound IPv4 as a best-effort fallback. UDP connect()
     # selects a local address without sending packets.
@@ -209,29 +213,21 @@ def _enumerate_usable_ipv4_addresses() -> list[str]:
     # up with its own subnet's network address as its host IP) would be
     # advertised and then crash the zeroconf socket with ``EADDRNOTAVAIL``.
     prefix_by_address = {
-        address: prefix
-        for address, prefix in ifaddr_entries
-        if prefix is not None
+        address: prefix for address, prefix in ifaddr_entries if prefix is not None
     }
     enriched_socket_entries = [
         (address, prefix_by_address.get(address, prefix))
         for address, prefix in socket_entries
     ]
 
-    return _select_advertised_addresses(
-        [*ifaddr_entries, *enriched_socket_entries]
-    )
+    return _select_advertised_addresses([*ifaddr_entries, *enriched_socket_entries])
 
 
 def _resolve_concrete_host_ipv4_addresses(host: str) -> list[str]:
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
-        try:
-            infos = socket.getaddrinfo(host, None, socket.AF_INET)
-        except socket.gaierror:
-            return []
-        addresses = [sockaddr[0] for *_unused, sockaddr in infos]
+        addresses = _getaddrinfo_ipv4(host)
     else:
         addresses = [str(ip)]
 
@@ -333,7 +329,9 @@ class MdnsAdvertiser:
                 await self._close_zeroconf_locked()
             self._start_args = {"host": host, "port": port, "path": path}
             try:
-                advertisement = await self._start_locked(host=host, port=port, path=path)
+                advertisement = await self._start_locked(
+                    host=host, port=port, path=path
+                )
             except Exception:
                 self._start_args = None
                 self._last_advertised_addresses = None

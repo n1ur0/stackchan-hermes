@@ -34,6 +34,7 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include "avatar_set_fetcher.h"
 
 #include <smooth_ui_toolkit.hpp>
+#include <cmath>
 #include <esp_log.h>
 #include <driver/i2c_master.h>
 #include <driver/gpio.h>
@@ -625,6 +626,13 @@ private:
     }
 };
 
+// LVGL animation exec callback for the subtitle auto-scroll. The device
+// pushes audio at real-time pace, so scrolling the caption to match the
+// speech: values run 0 → max scroll Y; each tick snaps scroll to that Y.
+void subtitle_scroll_anim_exec_cb(void* var, int32_t v) {
+    lv_obj_scroll_to_y(static_cast<lv_obj_t*>(var), v, LV_ANIM_OFF);
+}
+
 class StackChanBoard : public WifiBoard {
 private:
     // Internal I2C bus (shared by AXP2101 / AW9523 / FT6336 / PY32 / Si12T /
@@ -890,7 +898,11 @@ private:
     //   listen = start a tap-equivalent listen (record -> STT -> Hermes)
     //   off    = no reaction
     enum class ProxMode { Off, Reflex, Listen };
-    static constexpr ProxMode PROX_MODE_DEFAULT = ProxMode::Listen;
+    // Touchscreen-only activation policy (user requirement 2026-09-19): the
+    // hand-wave must NOT open the audio channel. Default is therefore Reflex
+    // (head-up + happy face, board-local), and any persisted "listen" value
+    // is migrated down to "reflex" at boot (see InitializeLtr553Proximity).
+    static constexpr ProxMode PROX_MODE_DEFAULT = ProxMode::Reflex;
     static constexpr int PROX_PS_THRESHOLD_DEFAULT    = 600;
                                                        // raw PS counts (0..2047):
                                                        // above the 20-30cm
@@ -1048,6 +1060,43 @@ private:
 #endif
     std::atomic<uint32_t> auto_release_timeout_ms_{
         AUTO_TORQUE_RELEASE_DEFAULT_MS};
+
+    // ---- Continuous "aliveness" head wave (Reachy-style fluid motion) ----
+    //
+    // One-shot set_head_angles moves plus gateway-side streaming both look
+    // mechanical: a discrete move-and-hold is stepwise, and re-anchoring the
+    // SCS0009 interpolation faster than its duration resets progress and
+    // stalls the head (the "stale" complaint). The fix — the firmware-native
+    // analogue of Reachy's set_target() control loop — is to render motion
+    // CONTINUOUSLY in ServoTaskMain at MOTION_POLL_INTERVAL_MS cadence: each
+    // tick it samples a smooth additive waveform
+    //     target(axis) = center + amp * sin(2*pi*f_hz*t + phase)
+    // and issues a short StartMove so the servo interpolates for a fraction
+    // of its step duration before the next step re-anchors. The head therefore
+    // glides along the curve instead of hopping between set-points, with zero
+    // network round-trips and zero dead time. The gateway enables a wave per
+    // conversational phase (still sway / thinking weave / speech bob). Any
+    // explicit set_head_angles, touch stroke or idle-settle stops the wave.
+    static constexpr uint32_t WAVE_STEP_DURATION_MS =
+        MOTION_POLL_INTERVAL_MS * 2;  // ~100 ms interp between 50 ms steps
+    static constexpr float kPi = 3.14159265358979f;
+    struct HeadWave {
+        float center_yaw = 0.0f;
+        float center_pitch = 38.0f;
+        float yaw_amp = 0.0f;      // degrees
+        float yaw_freq_hz = 0.0f;  // Hz
+        float yaw_phase_rad = 0.0f;
+        float pitch_amp = 0.0f;      // degrees
+        float pitch_freq_hz = 0.0f;  // Hz
+        float pitch_phase_rad = 0.0f;
+        uint64_t start_us = 0;  // waveform epoch, set by StartHeadWave
+    };
+    // Single-writer: ServoTaskMain is the only renderer; StartHeadWave /
+    // StopHeadWave (MCP task) write the config + active flag under
+    // motion_mutex_. The render copies the whole struct under the same mutex
+    // into a local before releasing it, so reads are never torn.
+    std::atomic<bool> head_wave_active_{false};
+    HeadWave head_wave_{};
 
     // Issue #80 / #98: pitch is guarded by two complementary tiers.
     //
@@ -1235,7 +1284,17 @@ private:
         int speed = static_cast<int>(speed_f);
 
         constexpr float kMin = 10.0f;
-        constexpr float kMax = 650.0f;
+        constexpr float kMax = 330.0f;  // was 650.0f — Issue #88 retune.
+        // Aliveness motion retune (2026-09-19): the previous 650.0f cap let
+        // short / high-speed moves map to a stiffness-650 spring, which on a
+        // ±90° travel head collapses small gesture moves into a stiff ~60 ms
+        // snap — mechanical and imperceptible ("stale"). The official M5Stack
+        // reference (m5stack/StackChan motion/servo.h) drives motion with a
+        // critically-damped spring ~stiffness 170 / settling ~0.4 s. Capping
+        // here at 330 keeps the natural 600 ms default move (~162) intact while
+        // halving the stiffness roof, so even speed-driven short moves settle
+        // with a visible, organic ease instead of snapping. damping is derived
+        // (2*sqrt(mass*stiffness)) so it stays critically damped at every k.
         constexpr float kMass = 1.0f;
         float normalized_speed = static_cast<float>(speed) / 1000.0f;
         float stiffness =
@@ -3963,6 +4022,13 @@ private:
             servo_wobble_active_.store(false);
             servo_wobble_step_.store(0);
         }
+        // Any explicit move (set_head_angles, touch revert, idle settle) owns
+        // the head and supersedes a running presence wave. The wave renderer
+        // itself issues StartMove directly (not via this method), so it never
+        // self-cancels here.
+        if (head_wave_active_.load()) {
+            head_wave_active_.store(false);
+        }
         motion_driver_->StartMove(yaw_deg, pitch_deg, duration_ms,
                                   prefer_linear);
         xSemaphoreGive(motion_mutex_);
@@ -4092,8 +4158,95 @@ private:
         // I/O is performed under it), so taking it from ESP_TIMER_TASK
         // is bounded to sub-millisecond hold time.
         xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+        // A touch stroke is a user intent to get the robot's attention; it
+        // supersedes any running presence wave so the wobble is the sole
+        // motion driver for the reaction window.
+        head_wave_active_.store(false);
         servo_wobble_step_.store(0);
         servo_wobble_active_.store(true);
+        xSemaphoreGive(motion_mutex_);
+    }
+
+    // Start a continuous additive presence wave. Writes the config under
+    // motion_mutex_ (ServoTaskMain copies it under the same mutex on each
+    // render, so the struct is never read torn). Re-arms the idle backstop so
+    // the long auto-settle does not recenter the head mid-conversation.
+    void StartHeadWave(const HeadWave& wave) {
+        if (!servo_ok_ || motion_driver_ == nullptr) {
+            ESP_LOGW(TAG, "head_wave skipped: servo not initialized");
+            return;
+        }
+        xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+        head_wave_ = wave;
+        head_wave_.start_us = esp_timer_get_time();
+        // A freshly-started wave supersedes any staged touch wobble.
+        servo_wobble_active_.store(false);
+        servo_wobble_step_.store(0);
+        head_wave_active_.store(true);
+        xSemaphoreGive(motion_mutex_);
+        ScheduleIdleSettle();
+        ESP_LOGI(TAG,
+                 "head_wave start: yaw amp=%.1f deg @ %.2f Hz, pitch amp=%.1f deg "
+                 "@ %.2f Hz, center=%d/%d",
+                 wave.yaw_amp, wave.yaw_freq_hz, wave.pitch_amp,
+                 wave.pitch_freq_hz, (int)wave.center_yaw, (int)wave.center_pitch);
+    }
+
+    void StopHeadWave() {
+        if (motion_mutex_ == nullptr) {
+            return;
+        }
+        bool was_active = head_wave_active_.load();
+        xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+        head_wave_active_.store(false);
+        xSemaphoreGive(motion_mutex_);
+        if (was_active) {
+            ESP_LOGI(TAG, "head_wave stop");
+        }
+    }
+
+    // Render one wave step on the servo_motion task. Called every
+    // ServoTaskMain tick while head_wave_active_ — this is the 50 Hz
+    // "alive" loop that makes motion fluid. Samples the waveform and issues a
+    // short StartMove so the servo keeps gliding rather than settling.
+    void RenderHeadWave() {
+        if (!servo_ok_ || motion_driver_ == nullptr) {
+            return;
+        }
+        // A touch wobble owns the head for its reaction window; skip the
+        // wave step while it is active.
+        if (servo_wobble_active_.load(std::memory_order_acquire)) {
+            return;
+        }
+        HeadWave w;
+        xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+        if (!head_wave_active_.load(std::memory_order_acquire)) {
+            xSemaphoreGive(motion_mutex_);
+            return;
+        }
+        w = head_wave_;
+        xSemaphoreGive(motion_mutex_);
+        const uint64_t now_us = esp_timer_get_time();
+        const float t_s =
+            (float)(now_us - w.start_us) / 1e6f;
+        float yaw =
+            w.center_yaw + w.yaw_amp * std::sin(2.0f * kPi * w.yaw_freq_hz * t_s + w.yaw_phase_rad);
+        float pitch =
+            w.center_pitch + w.pitch_amp * std::sin(2.0f * kPi * w.pitch_freq_hz * t_s + w.pitch_phase_rad);
+        if (yaw < -90.0f) yaw = -90.0f;
+        if (yaw > 90.0f) yaw = 90.0f;
+        if (pitch < static_cast<float>(SAFE_PITCH_MIN)) pitch = static_cast<float>(SAFE_PITCH_MIN);
+        if (pitch > static_cast<float>(SAFE_PITCH_MAX)) pitch = static_cast<float>(SAFE_PITCH_MAX);
+        xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+        // Guard against a StopHeadWave racing in between the config copy
+        // above and this dispatch (RenderHeadWave is called from the same
+        // servo task, but StopHeadWave runs on the MCP task).
+        if (!head_wave_active_.load(std::memory_order_acquire)) {
+            xSemaphoreGive(motion_mutex_);
+            return;
+        }
+        motion_driver_->StartMove(yaw, pitch, WAVE_STEP_DURATION_MS,
+                                  /*prefer_linear=*/true);
         xSemaphoreGive(motion_mutex_);
     }
 
@@ -4108,6 +4261,7 @@ private:
                 continue;
             }
             motion_driver_->Tick();
+            RenderHeadWave();
             MaybeAutoReleaseTorque();
             ServoWobbleStepAdvance();
             taskYIELD();
@@ -4494,10 +4648,20 @@ private:
             if (!StringToProxMode(mode_str, &prox_mode_)) {
                 // No (or invalid) "mode" key: migrate from the legacy
                 // "enabled" bool written before mode was introduced.
-                // enabled=true -> the new default (listen), false -> off.
+                // enabled=true -> the new default (reflex), false -> off.
                 // The legacy key is left in place (harmless, read-only).
                 bool legacy_enabled = settings.GetBool("enabled", true);
                 prox_mode_ = legacy_enabled ? PROX_MODE_DEFAULT : ProxMode::Off;
+            } else if (prox_mode_ == ProxMode::Listen) {
+                // Touchscreen-only activation policy: a persisted "listen"
+                // (from before 2026-09-19) must not survive a reboot. Downgrade
+                // to reflex and write it back so the stale value is cleaned.
+                ESP_LOGW(TAG, "proximity 'listen' migrated to 'reflex' (touchscreen-only policy)");
+                prox_mode_ = ProxMode::Reflex;
+                {
+                    Settings writable("stackchan_prox", true);
+                    writable.SetString("mode", "reflex");
+                }
             }
             prox_ps_threshold_ =
                 settings.GetInt("threshold", PROX_PS_THRESHOLD_DEFAULT);
@@ -4820,6 +4984,14 @@ private:
         if (status_label_ == nullptr) {
             return false;
         }
+        // Bound the label to the LCD width with wrap, so a long status
+        // caption (e.g. "Searching: <query>") wraps onto a second line
+        // instead of overflowing past the screen edge and being clipped.
+        // Width 304 leaves an 8px margin each side of the 320px display,
+        // mirroring the subtitle label's fixed-width treatment.
+        lv_label_set_long_mode(status_label_, LV_LABEL_LONG_MODE_WRAP);
+        lv_obj_set_width(status_label_, 304);
+        lv_obj_set_style_text_align(status_label_, LV_TEXT_ALIGN_CENTER, 0);
         // Translucent black backing for legibility over the face. The label
         // inherits the screen's text font (the common puhui font with
         // Japanese glyphs), so no explicit font is set here.
@@ -4894,11 +5066,14 @@ private:
             return false;
         }
         // Wrap long sentences across lines instead of overflowing the screen
-        // width. The fixed width (300 of the 320 px LCD) plus a max height of
-        // ~3 lines keeps the box to 2-3 wrapped lines; extra text is clipped.
+        // width. The width is fixed (300 of the 320 px LCD) and the height
+        // is clamped with a hard cap so the caption reads as a ~5-line
+        // viewport. Longer replies stay legible because the label is
+        // SCROLLABLE: SetSubtitleText() auto-scrolls to the bottom as the
+        // TTS plays, instead of clipping the overflow forever.
         lv_label_set_long_mode(subtitle_label_, LV_LABEL_LONG_MODE_WRAP);
         lv_obj_set_width(subtitle_label_, 300);
-        lv_obj_set_style_max_height(subtitle_label_, 78, 0);
+        lv_obj_set_height(subtitle_label_, 130);
         lv_obj_set_style_text_align(subtitle_label_, LV_TEXT_ALIGN_CENTER, 0);
         // Same translucent black backing as status_label_ for legibility.
         lv_obj_set_style_bg_color(subtitle_label_, lv_color_black(), 0);
@@ -4910,7 +5085,12 @@ private:
         lv_obj_set_style_pad_top(subtitle_label_, 3, 0);
         lv_obj_set_style_pad_bottom(subtitle_label_, 3, 0);
         lv_obj_align(subtitle_label_, LV_ALIGN_BOTTOM_MID, 0, -6);
-        lv_obj_clear_flag(subtitle_label_, LV_OBJ_FLAG_SCROLLABLE);
+        // Scrollable so overflow text can be revealed (the scroll animation
+        // is started from SetSubtitleText). No scrollbar and no horizontal
+        // scroll, so the caption still reads as a clean fixed box.
+        lv_obj_add_flag(subtitle_label_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_scroll_dir(subtitle_label_, LV_DIR_VER);
+        lv_obj_set_scrollbar_mode(subtitle_label_, LV_SCROLLBAR_MODE_OFF);
         // Hidden until the first non-empty SetSubtitleText().
         lv_obj_add_flag(subtitle_label_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(subtitle_label_);
@@ -4932,6 +5112,10 @@ private:
         if (!EnsureSubtitleLabel()) {
             return false;
         }
+        // Stop any in-flight scroll animation and reset to the top before
+        // applying new content (either clearing or a fresh subtitle).
+        lv_anim_delete(subtitle_label_, subtitle_scroll_anim_exec_cb);
+        lv_obj_scroll_to_y(subtitle_label_, 0, LV_ANIM_OFF);
         if (safe[0] == '\0') {
             lv_obj_add_flag(subtitle_label_, LV_OBJ_FLAG_HIDDEN);
             // Redraw the vacated area (the hidden label can't invalidate
@@ -4944,6 +5128,29 @@ private:
             // Same-frame flush so the subtitle appears without a one-turn lag.
             lv_obj_update_layout(subtitle_label_);
             lv_obj_invalidate(subtitle_label_);
+
+            // Auto-scroll: the caption box is a ~5-line viewport, but the
+            // reply is clamped at the gateway to several sentences. Scroll
+            // from top to bottom over ~40 ms/char (roughly half the speech
+            // pace the gateway choreographer estimates at ~90 ms/char) so
+            // the full caption is revealed quickly and stays readable while
+            // the TTS plays, without lingering on stale lines.
+            int32_t scroll_max = lv_obj_get_scroll_bottom(subtitle_label_);
+            if (scroll_max > 0) {
+                uint32_t scroll_ms = 600 + static_cast<uint32_t>(strlen(safe)) * 40;
+                if (scroll_ms > 15000) {
+                    scroll_ms = 15000;
+                }
+                lv_anim_t a;
+                lv_anim_init(&a);
+                lv_anim_set_var(&a, subtitle_label_);
+                lv_anim_set_exec_cb(&a, subtitle_scroll_anim_exec_cb);
+                lv_anim_set_values(&a, 0, scroll_max);
+                lv_anim_set_duration(&a, scroll_ms);
+                lv_anim_set_path_cb(&a, lv_anim_path_linear);
+                lv_anim_start(&a);
+                ESP_LOGI(TAG, "Subtitle auto-scroll: %d px over %u ms", (int)scroll_max, (unsigned)scroll_ms);
+            }
         }
         lv_refr_now(lv_obj_get_display(subtitle_label_));
         return true;
@@ -5869,6 +6076,56 @@ private:
                 return root;
             });
 
+        mcp_server.AddTool(
+            "self.robot.set_head_wave",
+            "Start a continuous, fluid head-motion wave (Reachy-style 'alive' presence). "
+            "Rendered natively in the firmware servo task at 50 Hz, so the head glides "
+            "along a smooth sine curve instead of hopping between set-points. "
+            "center_yaw/center_pitch: base pose in degrees. yaw_amp/pitch_amp: oscillation "
+            "amplitude in degrees (pass 0 to hold that axis centered). yaw_freq_mhz / "
+            "pitch_freq_mhz: frequency in milli-Hz (e.g. 500 = 0.5 Hz sway, 1300 = 1.3 Hz speech "
+            "bob). yaw_phase_deg/pitch_phase_deg: phase offset in degrees. Stop with "
+            "clear_head_wave; any explicit set_head_angles / touch / idle-settle also stops it.",
+            PropertyList({Property("center_yaw", kPropertyTypeInteger, 0, -90, 90),
+                          Property("center_pitch", kPropertyTypeInteger, 38, 0, 88),
+                          Property("yaw_amp", kPropertyTypeInteger, 0, 0, 90),
+                          Property("yaw_freq_mhz", kPropertyTypeInteger, 0, 0, 5000),
+                          Property("yaw_phase_deg", kPropertyTypeInteger, 0, 0, 360),
+                          Property("pitch_amp", kPropertyTypeInteger, 0, 0, 80),
+                          Property("pitch_freq_mhz", kPropertyTypeInteger, 0, 0, 5000),
+                          Property("pitch_phase_deg", kPropertyTypeInteger, 0, 0, 360)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                HeadWave w;
+                w.center_yaw = static_cast<float>(properties["center_yaw"].value<int>());
+                w.center_pitch = static_cast<float>(properties["center_pitch"].value<int>());
+                w.yaw_amp = static_cast<float>(properties["yaw_amp"].value<int>());
+                w.yaw_freq_hz = properties["yaw_freq_mhz"].value<int>() / 1000.0f;
+                w.yaw_phase_rad =
+                    properties["yaw_phase_deg"].value<int>() * kPi / 180.0f;
+                w.pitch_amp = static_cast<float>(properties["pitch_amp"].value<int>());
+                w.pitch_freq_hz = properties["pitch_freq_mhz"].value<int>() / 1000.0f;
+                w.pitch_phase_rad =
+                    properties["pitch_phase_deg"].value<int>() * kPi / 180.0f;
+                StartHeadWave(w);
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddNumberToObject(root, "servo_init_ok", servo_ok_ ? 1 : 0);
+                cJSON_AddNumberToObject(root, "wave_active", head_wave_active_.load() ? 1 : 0);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.robot.clear_head_wave",
+            "Stop a running continuous head wave and let the head settle back toward "
+            "its current center. Safe to call even when no wave is active (no-op).",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                StopHeadWave();
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddNumberToObject(root, "servo_init_ok", servo_ok_ ? 1 : 0);
+                cJSON_AddNumberToObject(root, "wave_active", head_wave_active_.load() ? 1 : 0);
+                return root;
+            });
+
         // Persist the neutral (rest) pose so the head's resting yaw/pitch can
         // be retuned from the dashboard without a reflash. The values drive
         // boot-init, the proximity/touch revert (TouchRevertCb) and the
@@ -6569,9 +6826,20 @@ private:
                 if (!StringToProxMode(mode_str, &mode)) {
                     cJSON_AddBoolToObject(root, "ok", false);
                     cJSON_AddStringToObject(root, "error",
-                        "Unknown mode. Allowed: reflex, listen, off.");
+                        "Unknown mode. Allowed: reflex, off.");
                     ESP_LOGW(TAG, "set_proximity_config rejected: unknown mode '%s'",
                              mode_str.c_str());
+                    return root;
+                }
+                if (mode == ProxMode::Listen) {
+                    // Touchscreen-only activation policy: the hand-wave must
+                    // not open the audio channel. Reject 'listen' outright so
+                    // a LLM / user cannot re-enable it at runtime via MCP.
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error",
+                        "Mode 'listen' is disabled by policy: touchscreen is "
+                        "the only allowed listening trigger. Use 'reflex' or 'off'.");
+                    ESP_LOGW(TAG, "set_proximity_config rejected: mode 'listen' disabled by policy");
                     return root;
                 }
                 {
