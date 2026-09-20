@@ -69,7 +69,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import presence_report, sensors
+from . import _utils, presence_report, sensors
 from .event_log import rotate_old_entries
 from .heartbeat import is_quiet, parse_quiet_hours
 
@@ -217,23 +217,11 @@ def _resolve_report_dir() -> Path | None:
 
 def _atomic_write_text(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` atomically (write-temp + os.replace)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fp:
-            fp.write(text)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+    _utils.atomic_write_text(path, text)
 
 
 def _clamp_absent_after(value: Any) -> int:
-    try:
-        v = int(value)
-    except (TypeError, ValueError):
-        return DEFAULT_ABSENT_AFTER_S
-    return min(max(v, MIN_ABSENT_AFTER_S), MAX_ABSENT_AFTER_S)
+    return _utils.clamp(value, MIN_ABSENT_AFTER_S, MAX_ABSENT_AFTER_S, DEFAULT_ABSENT_AFTER_S)
 
 
 def _valid_window(spec: Any) -> str | None:

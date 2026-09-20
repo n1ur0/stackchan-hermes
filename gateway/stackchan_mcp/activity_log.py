@@ -31,13 +31,13 @@ Each line carries:
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import time
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import Any, Final
+
+from . import _utils
 
 logger = logging.getLogger(__name__)
 
@@ -120,10 +120,7 @@ def append(
     if duration_ms is not None:
         line["duration_ms"] = duration_ms
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(line, ensure_ascii=False) + "\n")
-            f.flush()
+        _utils.jsonl_append(path, line)
     except (OSError, PermissionError, TypeError, ValueError) as exc:
         logger.warning("activity_log: failed to append to %s: %s", path, exc)
 
@@ -147,23 +144,10 @@ def read_recent(
         return []
     rows: list[dict[str, Any]] = []
     try:
-        with path.open("r", encoding="utf-8") as f:
-            for raw in f:
-                stripped = raw.strip()
-                if not stripped:
-                    continue
-                try:
-                    obj = json.loads(stripped)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(obj, dict):
-                    continue
-                ts = obj.get("ts_unix")
-                if isinstance(ts, bool) or not isinstance(ts, (int, float)):
-                    continue
-                if source is not None and obj.get("source") != source:
-                    continue
-                rows.append(obj)
+        for obj in _utils.jsonl_read(path):
+            if source is not None and obj.get("source") != source:
+                continue
+            rows.append(obj)
     except (OSError, PermissionError) as exc:
         logger.warning("activity_log: failed to read %s: %s", path, exc)
         return []
@@ -191,41 +175,13 @@ def rotate_old_entries(
         now_unix = time.time()
     cutoff = now_unix - _retention_seconds()
 
-    kept: list[str] = []
     try:
-        with path.open("r", encoding="utf-8") as f:
-            for raw in f:
-                stripped = raw.strip()
-                if not stripped:
-                    continue
-                try:
-                    obj = json.loads(stripped)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(obj, dict):
-                    continue
-                ts = obj.get("ts_unix")
-                if isinstance(ts, bool) or not isinstance(ts, (int, float)):
-                    continue
-                if ts >= cutoff:
-                    kept.append(stripped + "\n")
+        kept = _utils.jsonl_keep_lines(path, cutoff=cutoff)
     except (OSError, PermissionError) as exc:
         logger.warning("activity_log: failed to read %s for rotation: %s", path, exc)
         return
 
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            delete=False,
-            dir=str(path.parent),
-            prefix=path.name + ".",
-            suffix=".tmp",
-        ) as tmp:
-            tmp.writelines(kept)
-            tmp.flush()
-            tmp_path = Path(tmp.name)
-        os.replace(tmp_path, path)
+        _utils.atomic_write_lines(path, kept)
     except (OSError, PermissionError) as exc:
         logger.warning("activity_log: failed to rotate %s: %s", path, exc)

@@ -22,13 +22,13 @@ persistence issues; callers should treat this helper as fire-and-forget.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import time
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import Final
+
+from . import _utils
 
 logger = logging.getLogger(__name__)
 
@@ -100,10 +100,7 @@ def log_event(
     if action is not None:
         line["action"] = action
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(line, ensure_ascii=False) + "\n")
-            f.flush()
+        _utils.jsonl_append(path, line)
     except (OSError, PermissionError) as exc:
         logger.warning(
             "Failed to append stackchan-event log line to %s: %s",
@@ -147,28 +144,8 @@ def rotate_old_entries(
         retention_seconds = retention_days * 24 * 60 * 60
     cutoff = now_unix - retention_seconds
 
-    kept: list[str] = []
     try:
-        with path.open("r", encoding="utf-8") as f:
-            for raw in f:
-                stripped = raw.strip()
-                if not stripped:
-                    continue
-                try:
-                    obj = json.loads(stripped)
-                except json.JSONDecodeError:
-                    logger.debug(
-                        "Dropping malformed event log line during rotation: %s",
-                        stripped[:120],
-                    )
-                    continue
-                if not isinstance(obj, dict):
-                    continue
-                ts_unix = obj.get("ts_unix")
-                if isinstance(ts_unix, bool) or not isinstance(ts_unix, (int, float)):
-                    continue
-                if ts_unix >= cutoff:
-                    kept.append(stripped + "\n")
+        kept = _utils.jsonl_keep_lines(path, cutoff=cutoff)
     except (OSError, PermissionError) as exc:
         logger.warning(
             "Failed to read stackchan-event log %s for rotation: %s",
@@ -178,19 +155,7 @@ def rotate_old_entries(
         return
 
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            delete=False,
-            dir=str(path.parent),
-            prefix=path.name + ".",
-            suffix=".tmp",
-        ) as tmp:
-            tmp.writelines(kept)
-            tmp.flush()
-            tmp_path = Path(tmp.name)
-        os.replace(tmp_path, path)
+        _utils.atomic_write_lines(path, kept)
     except (OSError, PermissionError) as exc:
         logger.warning(
             "Failed to atomically rotate stackchan-event log %s: %s",
